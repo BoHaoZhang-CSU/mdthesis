@@ -37,6 +37,19 @@
 -- 必须声明在所有用到它的函数之前 —— Lua 的 local 没有提升。
 local stats = { stripped = 0, hr_dropped = 0, h1_demoted = 0, toc_dropped = 0 }
 
+--[[
+  角色样式映射（由 tools/prepare_template.py 生成，convert.sh 通过环境变量传进来）。
+
+  用户自带模板里，「大标题 / 摘要 / 目录标题」可能叫别的名字（有人叫「论文题目」，
+  有人叫「封面标题」）。prepare_template 会从模板里识别出来并写成一份映射，
+  这里读它，就知道该把内容套到哪个样式上。
+
+  读不到（命令行单独跑 pandoc、或模板没加工过）就用我们模板的默认名 ——
+  那些名字由 prepare_template 从基准模板补齐，一定存在。
+]]
+local STYLE = { title = "摘要上标题", abstract = "摘要", toc = "目录两个字",
+                equation = "公式" }
+
 -- 中文章节序号。Lua 模式没有 | 交替，且 [一二三] 按字节匹配不安全，
 -- 所以用「找顿号 -> 比对表」的方式做精确前缀匹配。
 local CN_NUM = {}
@@ -169,6 +182,77 @@ local function strip_manual_toc(blocks)
   return out
 end
 
+--[[
+  ============ 公式编号（按章） ============
+
+  中文论文的公式编号是「（章号-序号）」、右对齐；公式本身居中。
+  排版靠模板里的「公式」样式 —— 该段落带两个制表位（居中位 + 右对齐位），
+  所以正文是：<Tab> 公式 <Tab>（3-1）
+
+  **只给「独占一段」的公式编号**（`$$...$$` 单独成段）。
+  不想编号的，用 fenced div 包起来：
+
+      ::: {.unnumbered}
+      $$E = mc^2$$
+      :::
+
+  （试过用 `\[...\]` 区分，但 pandoc 把它和 `$$...$$` 都解析成 DisplayMath，
+    AST 里分不出来 —— 所以只能用 Div。）
+]]
+local eq_chapter, eq_count = 0, 0
+
+local function is_chapter_header(b)
+  if b.t ~= "Header" or b.level ~= 2 then return false end
+  return not pandoc.utils.stringify(b.content):match("^%s*摘要%s*$")
+end
+
+-- 目测标记：零宽空格。后处理脚本靠它认出「公式表格」并去掉边框
+local ZWSP = "\226\128\139"
+
+-- 生成 3 列表格：空 | 公式（居中）| 编号（右对齐）
+-- 为什么用表格而不是制表位：pandoc 会把 DisplayMath **提升成独立段落**
+-- （<m:oMathPara>），和别的 inline 放不进同一段 —— 制表位方案实测行不通。
+-- 表格里公式单独占一个单元格，正好绕开这个限制，而且保留「显示式」排版
+-- （行内式会把 \sum 的上下限变成角标，论文里不能接受）。
+local function equation_table(math_el, num)
+  -- 用 markdown 表格当模板：手工构造 Table AST 很繁琐且 API 不稳定，这样最省事
+  local doc = pandoc.read(
+    "|  |  |  |\n|:---|:---:|---:|\n| " .. ZWSP .. " | XXXEQXXX | XXXNUMXXX |\n",
+    "markdown")
+  return doc:walk({
+    Str = function(el)
+      -- 注意占位符不能写成 @EQ@ —— 那会被 pandoc 当成引用（citations 语法）
+      if el.text == "XXXEQXXX" then return math_el end
+      if el.text == "XXXNUMXXX" then return pandoc.Str(num) end
+    end,
+  }).blocks[1]
+end
+
+local function is_chapter_header(b)
+  if b.t ~= "Header" or b.level ~= 2 then return false end
+  return not pandoc.utils.stringify(b.content):match("^%s*摘要%s*$")
+end
+
+local function number_equations(blocks)
+  local out = {}
+  for _, b in ipairs(blocks) do
+    if is_chapter_header(b) then          -- 进新的一章，重置本章计数
+      eq_chapter, eq_count = eq_chapter + 1, 0
+    end
+    -- 只给「独占一段」的公式编号；包在 ::: {.unnumbered} 里的 Div 不动
+    if b.t == "Para" and #b.content == 1
+       and b.content[1].t == "Math" and b.content[1].mathtype == "DisplayMath" then
+      eq_count = eq_count + 1
+      out[#out + 1] = equation_table(b.content[1],
+                                     string.format("（%d-%d）", eq_chapter, eq_count))
+      stats.equations = (stats.equations or 0) + 1
+    else
+      out[#out + 1] = b
+    end
+  end
+  return out
+end
+
 -- 每层是否启用手写编号剥离（由 Pandoc 入口扫描后填充）
 local strip_level = {}
 
@@ -199,17 +283,6 @@ local function styled(el, style)
   )
 end
 
---[[
-  角色样式映射（由 tools/prepare_template.py 生成，convert.sh 通过环境变量传进来）。
-
-  用户自带模板里，「大标题 / 摘要 / 目录标题」可能叫别的名字（有人叫「论文题目」，
-  有人叫「封面标题」）。prepare_template 会从模板里识别出来并写成一份映射，
-  这里读它，就知道该把内容套到哪个样式上。
-
-  读不到（命令行单独跑 pandoc、或模板没加工过）就用我们模板的默认名 ——
-  那些名字由 prepare_template 从基准模板补齐，一定存在。
-]]
-local STYLE = { title = "摘要上标题", abstract = "摘要", toc = "目录两个字" }
 do
   local raw = os.getenv("THESIS_STYLE_MAP")
   if raw then
@@ -495,6 +568,10 @@ function Pandoc(doc)
   strip_level = {}
   scan_numbering(doc.blocks)
 
+  -- 4.5 公式编号（在转换前做，此时标题还没被改写成 Div，层级信息还在）
+  eq_chapter, eq_count, stats.equations = 0, 0, 0
+  doc.blocks = number_equations(doc.blocks)
+
   -- 5. 转换
   local out = doc:walk({
     Header = Header,
@@ -504,6 +581,11 @@ function Pandoc(doc)
   })
 
   -- 6. 汇报自动做的改动 —— 用户不需要操作，但有权知道
+  if stats.equations > 0 then
+    note("change", string.format(
+      "给 %d 个公式加了编号（按章，形如「（3-1）」）。"
+        .. "不想编号的公式，用 ::: {.unnumbered} … ::: 包起来。", stats.equations))
+  end
   if stats.toc_dropped > 0 then
     note("change", "删掉了 markdown 里手写的目录（已自动生成 Word 目录域，格式与模板一致）")
   end

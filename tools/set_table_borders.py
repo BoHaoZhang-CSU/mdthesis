@@ -107,6 +107,11 @@ def _set_cell_bottom(cell_xml, header_border):
 
 
 def process_table(tbl_xml, top, bottom, header_border, stats):
+    # 公式表格（filter 生成的，用来放「公式 + 编号」）不能加边框 ——
+    # 靠零宽空格标记和显示式公式（m:oMathPara）两个特征认出来。
+    if "\u200b" in tbl_xml or "m:oMathPara" in tbl_xml:
+        stats["formula_tables"] = stats.get("formula_tables", 0) + 1
+        return tbl_xml
     tbl_xml = _add_tbl_borders(tbl_xml, _tbl_borders(top, bottom))
 
     # 表头行：pandoc 会给它打 <w:tblHeader/>
@@ -159,6 +164,8 @@ def main():
                 data = doc.encode("utf-8")
             zout.writestr(item, data)
 
+    if stats.get("formula_tables"):
+        print(f"  跳过 {stats['formula_tables']} 个公式表格的边框（公式+编号用的无框表格）")
     if stats["tables"]:
         print(f"  表格边框已写成直接格式：{stats['tables']} 个表格，"
               f"{stats['header_rows']} 个表头行（WPS 下也能出三线表）")

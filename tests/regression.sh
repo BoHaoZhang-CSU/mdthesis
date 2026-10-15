@@ -123,6 +123,23 @@ z=zipfile.ZipFile('$out')
 print(1 if any('media' in n and not n.endswith('/') for n in z.namelist()) else 0)")
       [ "$has" = "1" ]; check "用户图片被保留" "$?"
       ;;
+    T15_equations)
+      # 按章编号：第1章两个（1-1）（1-2）、第2章一个（2-1）
+      # 包在 ::: {.unnumbered} 里的不编号
+      got=$(python3 -I -c "
+import zipfile,re
+d=zipfile.ZipFile('$out').read('word/document.xml').decode()
+nums=[]
+for t in re.findall(r'<w:tbl>.*?</w:tbl>', d, re.S):
+    if chr(0x200b) in t or 'm:oMathPara' in t:
+        txt=''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', t)).replace(chr(0x200b),'').strip()
+        nums.append(txt)
+borderless = all('<w:tblBorders>' not in t for t in re.findall(r'<w:tbl>.*?</w:tbl>', d, re.S) if 'm:oMathPara' in t)
+print(','.join(nums) + '|' + ('1' if borderless else '0'))
+")
+      [ "$got" = "（1-1）,（1-2）,（2-1）|1" ]
+      check "按章编号正确且公式表无边框（实际 $got）" "$?"
+      ;;
     T12_bare_numbering)
       # 手写的裸数字编号（## 3 递推…）必须被剥掉
       has=$(python3 -I -c "

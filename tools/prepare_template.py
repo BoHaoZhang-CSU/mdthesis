@@ -218,6 +218,46 @@ def fix_outline_levels(styles_xml):
     return styles_xml
 
 
+EQUATION_STYLE_NAME = "公式"
+
+
+def add_equation_style(styles_xml, doc_xml):
+    """加一个 `公式` 样式，用来排带编号的公式。
+
+    中文论文的公式排版是「公式居中、编号右对齐」，靠**段落上的两个制表位**实现
+    （不是表格）：段首一个 Tab 跳到居中位置，公式后面一个 Tab 跳到右对齐位置。
+
+    制表位不能写死 —— 不同模板的页边距不同。这里从模板自己的 sectPr 算出正文宽度，
+    居中位取一半、右对齐位取整宽。样式已存在就不动（使用者可能自己调过）。
+    """
+    if re.search(r'<w:name w:val="%s"\s*/>' % re.escape(EQUATION_STYLE_NAME), styles_xml):
+        print("  公式样式已存在，跳过")
+        return styles_xml
+
+    m = re.search(r'<w:pgSz[^>]*w:w="(\d+)"', doc_xml)
+    width = int(m.group(1)) if m else 11906
+    left = re.search(r'<w:pgMar[^>]*w:left="(\d+)"', doc_xml)
+    right = re.search(r'<w:pgMar[^>]*w:right="(\d+)"', doc_xml)
+    text_w = width - int(left.group(1) if left else 1701) - int(right.group(1) if right else 1134)
+    center, rightpos = text_w // 2, text_w
+
+    style = (
+        f'<w:style w:type="paragraph" w:customStyle="1" w:styleId="{EQUATION_STYLE_NAME}">'
+        f'<w:name w:val="{EQUATION_STYLE_NAME}"/><w:basedOn w:val="Normal"/><w:qFormat/>'
+        f'<w:pPr>'
+        f'<w:tabs>'
+        f'<w:tab w:val="center" w:pos="{center}"/>'
+        f'<w:tab w:val="right" w:pos="{rightpos}"/>'
+        f'</w:tabs>'
+        f'<w:spacing w:before="120" w:after="120"/>'
+        f'<w:jc w:val="left"/>'
+        f'</w:pPr></w:style>'
+    )
+    print(f"  加上「{EQUATION_STYLE_NAME}」样式（制表位 居中@{center} 右@{rightpos}，"
+          f"按模板正文宽度 {text_w} 算出）")
+    return styles_xml.replace("</w:styles>", style + "</w:styles>", 1)
+
+
 def fix_table_style_id(styles_xml):
     """把表格样式的 styleId 改成 "Table"。
 
@@ -312,6 +352,7 @@ if has_donor:
 styles = set_page_break(styles)
 styles = fix_table_style_id(styles)
 styles = fix_outline_levels(styles)
+styles = add_equation_style(styles, doc_body)
 
 # --- 找出要删的 media 及其关系 ---
 rels_name = "word/_rels/document.xml.rels"
