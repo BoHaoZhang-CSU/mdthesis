@@ -699,7 +699,9 @@ local cap_chapter, cap_n = 0, { ["表"] = 0, ["图"] = 0 }
 local function number_captions(blocks)
   local out = {}
   for i, b in ipairs(blocks) do
-    if b.t == "Header" and b.level == 2 then
+    if is_chapter_header(b) then
+      -- ⚠️ 必须用 is_chapter_header（它排除了「摘要」）—— 摘要被 styled 成**不编号**的样式，
+      -- 所以它不算一章；算进去的话全文表题/图题编号整体 +1（用户报过：第 4 章的表编成了 5-1）。
       cap_chapter = cap_chapter + 1
       cap_n = { ["表"] = 0, ["图"] = 0 }
       out[#out + 1] = b
