@@ -106,12 +106,60 @@ def _set_cell_bottom(cell_xml, header_border):
     return cell_xml[:m.start()] + "<w:tcPr>" + inner + "</w:tcPr>" + cell_xml[m.end():]
 
 
-def process_table(tbl_xml, top, bottom, header_border, stats):
-    # 公式表格（filter 生成的，用来放「公式 + 编号」）不能加边框 ——
+def _all_none():
+    return ("<w:tblBorders>"
+            + "".join('<w:%s w:val="none" w:sz="0" w:space="0" w:color="auto"/>' % s
+                      for s in ("top", "left", "bottom", "right", "insideH", "insideV"))
+            + "</w:tblBorders>")
+
+
+def _fix_formula_table(tbl_xml, text_width):
+    """公式表格（filter 生成的，放「公式 + 编号」）：固定列宽 + 彻底无边框。
+
+    两处都必须用**直接格式**压过样式，否则会出问题：
+
+    1. **边框**：模板的 Table 样式本身就是三线表（上下 sz=12 的粗线）。
+       只「不添加」直接边框是不够的 —— 样式照样生效，公式上下就出现两条黑线。
+       必须显式把六条边都设成 none。
+
+    2. **列宽**：pandoc 生成的是 tblW="auto"，列宽跟着内容自适应 ——
+       不同公式宽度不同 → 编号列宽度不同 → **编号对不齐**；
+       而且中间列的中心不等于页面中心、编号右边缘不等于右边距。
+       固定成「编号列 / 公式列 / 编号列」且**首尾等宽**：
+       这样中间列的中心正好落在页面中心、编号列右边缘正好落在右边距。
+    """
+    # 编号列宽度要装得下「（12-34）」这种最长的编号，还要留出单元格左右边距。
+    # 首列必须和编号列**等宽** —— 这样中间列的中心才正好落在页面中心。
+    w_num = 1400
+    w1 = w3 = w_num
+    w2 = text_width - w1 - w3
+
+    # 固定表格总宽
+    tbl_xml = re.sub(r'<w:tblW[^>]*/>',
+                     f'<w:tblW w:type="dxa" w:w="{text_width}"/>', tbl_xml, count=1)
+    # 固定各列宽
+    widths = [w1, w2, w3]
+    idx = [0]
+    def _col(m):
+        v = widths[idx[0]]; idx[0] += 1
+        return f'<w:gridCol w:w="{v}"/>'
+    tbl_xml = re.sub(r'<w:gridCol[^>]*/>', _col, tbl_xml)
+    # 关掉全部边框（压过样式的三线表）
+    if "<w:tblBorders>" in tbl_xml:
+        tbl_xml = re.sub(r"<w:tblBorders>.*?</w:tblBorders>", "", tbl_xml, flags=re.S)
+    tbl_xml = tbl_xml.replace("<w:tblPr>", "<w:tblPr>" + _all_none(), 1)
+    # 固定布局，否则 Word 仍会按内容重算列宽
+    if "<w:tblLayout" not in tbl_xml:
+        tbl_xml = tbl_xml.replace("<w:tblPr>", '<w:tblPr><w:tblLayout w:type="fixed"/>', 1)
+    return tbl_xml
+
+
+def process_table(tbl_xml, top, bottom, header_border, stats, text_width):
+    # 公式表格（filter 生成的，用来放「公式 + 编号」）单独处理 ——
     # 靠零宽空格标记和显示式公式（m:oMathPara）两个特征认出来。
     if "\u200b" in tbl_xml or "m:oMathPara" in tbl_xml:
         stats["formula_tables"] = stats.get("formula_tables", 0) + 1
-        return tbl_xml
+        return _fix_formula_table(tbl_xml, text_width)
     tbl_xml = _add_tbl_borders(tbl_xml, _tbl_borders(top, bottom))
 
     # 表头行：pandoc 会给它打 <w:tblHeader/>
@@ -146,16 +194,26 @@ def main():
 
     zin = zipfile.ZipFile(src)
     doc = zin.read("word/document.xml").decode("utf-8")
+    # 正文宽度 —— 公式表格按它定列宽，好让编号落在右边距上
+    try:
+        _tpl_doc = zipfile.ZipFile(tpl_path).read("word/document.xml").decode("utf-8")
+    except KeyError:
+        _tpl_doc = ""
+    _m = re.search(r'<w:pgSz[^>]*w:w="(\d+)"', _tpl_doc)
+    _pw = int(_m.group(1)) if _m else 11906
+    _l = re.search(r'<w:pgMar[^>]*w:left="(\d+)"', _tpl_doc)
+    _r = re.search(r'<w:pgMar[^>]*w:right="(\d+)"', _tpl_doc)
+    text_width = _pw - int(_l.group(1) if _l else 1701) - int(_r.group(1) if _r else 1134)
+
     stats = {"tables": 0, "header_rows": 0}
 
-    if top and bottom:
-        doc = re.sub(
-            r"<w:tbl>.*?</w:tbl>",
-            lambda m: process_table(m.group(0), top, bottom,
-                                    header_border or _none("bottom"), stats),
-            doc,
-            flags=re.S,
-        )
+    doc = re.sub(
+        r"<w:tbl>.*?</w:tbl>",
+        lambda m: process_table(m.group(0), top, bottom,
+                                header_border or _none("bottom"), stats, text_width),
+        doc,
+        flags=re.S,
+    )
 
     with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
         for item in zin.infolist():
