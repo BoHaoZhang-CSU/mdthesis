@@ -21,6 +21,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import re
+
 from . import config
 
 
@@ -106,6 +108,22 @@ def _run(cmd, cwd: Path, timeout: int, env: dict, log_path: Path) -> tuple[int, 
             raise ConvertError(f"转换超时（超过 {timeout} 秒），已终止", status=504)
     text = log_path.read_text(encoding="utf-8", errors="replace")
     return rc, text
+
+
+# pandoc 自己的资源警告（图片找不到之类）只在 stderr，不写进 filter 的报告文件。
+# 不捞出来的话，用户只会看到图片凭空变成一行文字，不知道为什么。
+_PANDOC_RES = re.compile(r"^\[WARNING\]\s*Could not fetch resource (\S+?):", re.M)
+
+
+def _resource_warnings(log: str) -> list[str]:
+    """把 pandoc 的「资源取不到」警告转成用户看得懂的话。"""
+    names = list(dict.fromkeys(_PANDOC_RES.findall(log)))
+    if not names:
+        return []
+    shown = "、".join(names[:3]) + ("…" if len(names) > 3 else "")
+    return [f"{len(names)} 处图片没能读到，已替换成文字（{shown}）。"
+            f"接口只收单个 .md 文件，图片传不上来 —— 含图片的文档请用命令行版转换"
+            f"（tools/convert.sh，它会把图片一起读到）。"]
 
 
 def _read_report(path: Path) -> tuple[list[str], list[str], list[str]]:
@@ -211,6 +229,7 @@ def run_convert(
             raise ConvertError("转换没有产出文件", status=500, detail=log.strip()[-2000:])
 
         warnings, changes, guesses = _read_report(warnings_file)
+        warnings += _resource_warnings(log)      # pandoc 那部分警告单独捞
         return ConvertResult(
             docx=out_path.read_bytes(),
             warnings=warnings,

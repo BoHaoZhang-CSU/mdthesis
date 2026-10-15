@@ -62,7 +62,7 @@ assert not re.search(r'border-radius:\s*[1-9]', h), '还有圆角'
 assert 'id=\"pasteToggle\"' in h and 'id=\"pastePanel\" hidden' in h, '粘贴入口不是默认折叠的'
 assert 'new File([text]' in h and 'addFiles([new File' in h, '粘贴没走现有的文件队列'
 assert 'function titleFromMd' in h, '没从 # 标题取名'
-assert '粘贴的内容不含图片' in h, '没提示粘贴不含图片'
+assert '粘贴只带文字' in h, '没提示粘贴只带文字'
 " >/dev/null 2>&1
 check "页面结构完整（拖拽 / 队列 / 勾选 / 时间 / 模板位置 / 自动下载）" "$?"
 
@@ -339,6 +339,15 @@ assert cnt.get('heading 2', 0) == 7 and cnt.get('heading 3', 0) == 18, \
     f'章节样式没识别对：{dict(cnt)}'
 print('OK')" >/dev/null 2>&1
 check "自定义中文标题样式已按大纲级别识别（章 7 / 节 18）" "$?"
+
+# ── 图片读不到时必须告诉用户（pandoc 自己的警告只在 stderr，要单独捞）──
+echo "── POST /convert （引用了一张不存在的图）"
+printf '# 文档\n\n## 一节\n\n![图](figs/nope.png)\n\n正文。\n' > "$TMP/withimg.md"
+curl -sf --max-time 120 -X POST "$BASE/convert" \
+  -F "file=@$TMP/withimg.md" -D "$TMP/himg.txt" -o /dev/null
+check "转换成功" "$?"
+grep -qi '^x-warnings-count: *[1-9]' "$TMP/himg.txt"
+check "报告了图片没读到（不是静默丢掉）" "$?"
 
 echo "── 安全：markdown 里引用本地文件"
 printf '![x](/etc/hostname)\n' > "$TMP/evil.md"
