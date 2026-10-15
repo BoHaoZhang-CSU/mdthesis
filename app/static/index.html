@@ -155,7 +155,13 @@ $('mdFile').onchange = () => {
   $('mdFile').value = '';
 };
 
-function isMd(f) { return f && /\.(md|markdown|txt)$/i.test(f.name); }
+function isMd(f) {
+  if (!f) return false;
+  if (/\.(md|markdown|txt)$/i.test(f.name)) return true;
+  // 有些导出的文件没有扩展名，但 MIME 能认出来
+  return /markdown/i.test(f.type || '') ||
+         ((f.type === 'text/plain' || f.type === '') && f.size > 0 && f.size < 20 * 1024 * 1024);
+}
 
 /* 同名文件自动加 (2)(3) 后缀 —— 用户经常会重复拖同一个文件，
    不加的话列表里分不清，下载下来的 docx 也会互相覆盖。 */
@@ -171,16 +177,50 @@ function uniqueName(name) {
   }
 }
 
-function addFiles(fileList) {
+/* 从 DataTransfer 里取文件。三种来源都试，取到为止：
+   ① dataTransfer.files    标准路径
+   ② dataTransfer.items    个别环境只填这个
+   取不到就把「浏览器给的数据类型」返回出去，好定位是环境问题还是用法问题。 */
+function filesFrom(dt) {
+  if (!dt) return { files: [], types: '(没有 dataTransfer)' };
+  let out = Array.from(dt.files || []);
+  if (!out.length && dt.items && dt.items.length) {
+    for (const it of dt.items) {
+      if (it.kind === 'file') { const f = it.getAsFile(); if (f) out.push(f); }
+    }
+  }
+  const types = dt.types ? Array.from(dt.types).join(', ') : '(未知)';
+  return { files: out, types: types };
+}
+
+function addFiles(fileList, dt) {
+  const got = dt !== undefined ? filesFrom(dt) : { files: Array.from(fileList || []), types: 'File 对象' };
+  const files = got.files;
+  if (!files.length) {
+    // 把浏览器实际给的类型显示出来 —— 这是判断「环境问题」还是「用法问题」的关键
+    say('<div class="line err">没能取到文件内容。<br>' +
+        '浏览器这次给的数据类型是：<b>' + esc(got.types) + '</b><br>' +
+        '如果是 <b>text/uri-list</b> 或空，说明是拖拽环境的问题（Linux 上跨 Wayland/X11 ' +
+        '拖拽偶尔会这样），改用下面的「点击选择文件」即可。</div>');
+    return;
+  }
+  const rejected = [];
   let n = 0;
-  for (const f of fileList) {
-    if (!isMd(f)) continue;
+  for (const f of files) {
+    if (!isMd(f)) { rejected.push(f.name || '(未命名)'); continue; }
     queue.push({ id: ++seq, file: f, name: uniqueName(f.name),
                  addedAt: Date.now(), checked: true, done: false });
     n++;
   }
   if (n) { $('status').innerHTML = ''; render(); }
+  // 被拒绝的一定要说出来 —— 静默跳过会让用户以为"拖进去没反应"
+  if (rejected.length) {
+    say('<div class="line err">只支持 .md / .markdown / .txt，这几个没加进来：' +
+        rejected.map(esc).join('、') + '</div>');
+  }
 }
+
+function say(html) { $('status').innerHTML = html; }
 
 // 拖拽绑在**整个页面**上 —— 只绑方框的话，用户拖到框外浏览器会直接打开文件，
 // 页面跳走，只能刷新回来（用户报过）。
@@ -193,7 +233,7 @@ window.addEventListener('dragleave', e => {
 window.addEventListener('drop', e => {
   e.preventDefault();
   drop.classList.remove('over');
-  if (e.dataTransfer) addFiles(e.dataTransfer.files);
+  addFiles(null, e.dataTransfer);
 });
 
 /* ---------- 相对时间 ---------- */
