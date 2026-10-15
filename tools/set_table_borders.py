@@ -113,6 +113,28 @@ def _all_none():
             + "</w:tblBorders>")
 
 
+def _num_col_width(tbl_xml, em=210):
+    """编号列该多宽：按表里最长的编号串估（全角 1em / ASCII 0.72em；五号 10.5pt ⇒ 1em = 210 twips）。
+
+    标定依据：WPS 导出的 PDF 里实测「（3-9）」渲染宽 **872 twips**
+      = 2 个全角括号（各 210） + 1 数字 + 1 连字符 + 1 数字（各约 151）
+      ⇒ 本式给 873，乘 3% 余量 = 899 ✓
+
+    ⚠️ **估窄了不会溢出，而是折行** —— 用户看到的现象是「离公式还有很远，编号却换行了」
+    （2026-10-15 踩过：模型算 852、实际要 872，所有编号都折了）。
+    """
+    best = 700                      # 下限：好歹装得下「（1-1）」
+    for cell in re.findall(r"<w:tc>.*?</w:tc>", tbl_xml, re.S):
+        if "m:oMath" in cell or "​" in cell:
+            continue                # 公式格 / 零宽空格标记格，跳过
+        txt = "".join(re.findall(r"<w:t[^>]*>([^<]*)</w:t>", cell))
+        if not txt.strip():
+            continue
+        w = sum(em if ord(c) > 0x2000 else int(em * 0.72) for c in txt)
+        best = max(best, w)
+    return int(best * 1.03)         # 3% 余量
+
+
 def _fix_formula_table(tbl_xml, text_width):
     """公式表格（filter 生成的，放「公式 + 编号」）：固定列宽 + 彻底无边框。
 
@@ -120,17 +142,25 @@ def _fix_formula_table(tbl_xml, text_width):
 
     1. **边框**：模板的 Table 样式本身就是三线表（上下 sz=12 的粗线）。
        只「不添加」直接边框是不够的 —— 样式照样生效，公式上下就出现两条黑线。
-       必须显式把六条边都设成 none。
+       必须显式把六条边都设成 nil（**不是 none** —— Word 会把 none 当"这层没规定"，
+       照样回落到样式。见 git log / 记忆里的实测）。
 
     2. **列宽**：pandoc 生成的是 tblW="auto"，列宽跟着内容自适应 ——
        不同公式宽度不同 → 编号列宽度不同 → **编号对不齐**；
        而且中间列的中心不等于页面中心、编号右边缘不等于右边距。
        固定成「编号列 / 公式列 / 编号列」且**首尾等宽**：
        这样中间列的中心正好落在页面中心、编号列右边缘正好落在右边距。
+
+    3. **两侧列尽量窄**：公式列能有多宽，取决于两侧列让出多少。
+       长公式超过公式列宽度时，渲染器会把公式**折断成两行**（用户报过：
+       「φd(k)」和「=[…]」不在同一行）。所以两侧列取"刚好装下编号"的宽度，
+       剩下的全给公式；单元格左右边距也清零（默认 108×2 twips 纯属浪费）。
     """
-    # 编号列宽度要装得下「（12-34）」这种最长的编号，还要留出单元格左右边距。
-    # 首列必须和编号列**等宽** —— 这样中间列的中心才正好落在页面中心。
-    w_num = 1400
+    # 编号列宽度：**按该表里实际的编号串算**，不写死。
+    # 之前写死 1400 twips，但实测「（3-9）」只占 872 —— 多出来的全是从公式那儿偷的宽度。
+    # 首列必须和编号列**等宽**，这样中间列的中心才正好落在页面中心；
+    # 公式列越宽，长公式越不容易被渲染器折断（WPS 会把超宽公式折成两行，用户报过）。
+    w_num = _num_col_width(tbl_xml)
     w1 = w3 = w_num
     w2 = text_width - w1 - w3
 
@@ -151,6 +181,18 @@ def _fix_formula_table(tbl_xml, text_width):
     # 固定布局，否则 Word 仍会按内容重算列宽
     if "<w:tblLayout" not in tbl_xml:
         tbl_xml = tbl_xml.replace("<w:tblPr>", '<w:tblPr><w:tblLayout w:type="fixed"/>', 1)
+    # 单元格左右边距清零：默认各 108 twips（5.4pt），对公式表是纯浪费 ——
+    # 省下来全给公式（合计 +216 twips），长公式更容易在一行里放下；
+    # 顺带编号的右边缘正好贴到右边距上（原来差的那 5.4pt 就是它）
+    if "<w:tblCellMar" not in tbl_xml:
+        mar = ('<w:tblCellMar>'
+               '<w:top w:w="0" w:type="dxa"/><w:left w:w="0" w:type="dxa"/>'
+               '<w:bottom w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/>'
+               '</w:tblCellMar>')
+        if "<w:tblLook" in tbl_xml:
+            tbl_xml = tbl_xml.replace("<w:tblLook", mar + "<w:tblLook", 1)
+        else:
+            tbl_xml = tbl_xml.replace("</w:tblPr>", mar + "</w:tblPr>", 1)
     return tbl_xml
 
 

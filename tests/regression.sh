@@ -148,6 +148,52 @@ print(','.join(nums) + '|' + ('1' if borderless else '0'))
 ")
       [ "$got" = "（1-1）,（1-2）,（2-1）|1" ]
       check "按章编号正确且公式表无边框（实际 $got）" "$?"
+      # 列宽不变量：首尾等宽（→ 公式列中心 = 页面中心）且总宽 = 正文宽度
+      # （→ 编号右边缘落在版心右边距）。公式列尽量宽，长公式才不容易被折断。
+      lw=$(python3 -I -c "
+import re, zipfile
+d=zipfile.ZipFile('$out').read('word/document.xml').decode()
+t=[x for x in re.findall(r'<w:tbl>.*?</w:tbl>', d, re.S) if 'm:oMathPara' in x][0]
+g=[int(v) for v in re.findall(r'<w:gridCol w:w=\"(\d+)\"', t)]
+# 不变量（不写死具体数字 —— 编号列按实际编号串自适应）：
+#   首尾等宽 → 公式列中心 = 页面中心；总宽 = 正文宽度 → 编号右边缘落在版心右边距；
+#   公式格 ≥ 6300 twips（315pt）→ 别偷偷把公式的宽度让给别处（WPS 会折断超宽公式）
+ok = g[0] == g[2] and sum(g) == 8306 and g[1] >= 6300
+print('OK' if ok else '坏:%s' % g)
+")
+      [ "$lw" = "OK" ]
+      check "公式表列宽不变量（首尾等宽 / 总宽=正文宽 / 公式格≥6300）（实际 $lw）" "$?"
+      ;;
+    T16_delimiters)
+      # 括号自适应：普通 [ ] ( ) 不会随内容变高 —— 装有分式的要改成 \left…\right
+      # （pandoc 生成 <m:d> + <m:grow>，Word/WPS 才拉伸）。用户报的问题。
+      got=$(python3 -I -c "
+import re, zipfile
+d=zipfile.ZipFile('$out').read('word/document.xml').decode()
+tbls=[x for x in re.findall(r'<w:tbl>.*?</w:tbl>', d, re.S) if 'm:oMathPara' in x]
+def delim(t):
+    m=re.search(r'<m:d>.*?</m:d>', t, re.S)
+    if not m: return 'none'
+    b=re.search(r'<m:begChr m:val=\"([^\"]*)\"', m.group(0))
+    e=re.search(r'<m:endChr m:val=\"([^\"]*)\"', m.group(0))
+    return ((b.group(1) if b else '?') + (e.group(1) if e else '?')
+            + ('+grow' if 'm:grow' in m.group(0) else '-nogrow'))
+inline={}
+for om in re.findall(r'<m:oMath>.*?</m:oMath>', d, re.S):
+    txt=''.join(re.findall(r'<m:t[^>]*>([^<]*)</m:t>', om))
+    if txt in ('x[i]','(k+1)','ab','a[b]'):
+        inline[txt]=om.count('<m:d>')
+print('%s / %s / %s / x[i]=%d (k+1)=%d ab=%d a[b]=%d' % (
+    delim(tbls[0]), delim(tbls[1]), delim(tbls[2]),
+    inline.get('x[i]',-1), inline.get('(k+1)',-1), inline.get('ab',-1), inline.get('a[b]',-1)))
+")
+      [ "$got" = "[]+grow / ()+grow / none / x[i]=0 (k+1)=0 ab=1 a[b]=0" ]
+      check "括号自适应正确（实括号撑开、下标/普通括号不动）（实际 $got）" "$?"
+      rep2="$OUTDIR/T16.report.jsonl"; rm -f "$rep2"
+      (cd "$HERE/cases" && THESIS_WARNINGS_FILE="$rep2" "$PROJ/tools/convert.sh" \
+          T16_delimiters.md "$OUTDIR/T16_report.docx" "$TPL") >/dev/null 2>&1
+      grep -q "修正了 2 处公式括号" "$rep2" 2>/dev/null
+      check "报告里写明修正 2 处括号（change 行只进报告文件）" "$?"
       ;;
     T12_bare_numbering)
       # 手写的裸数字编号（## 3 递推…）必须被剥掉

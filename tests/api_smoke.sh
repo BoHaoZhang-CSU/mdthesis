@@ -36,6 +36,11 @@ assert '毕业论文' in h, '缺中文标题'
 assert 'id=\"drop\"' in h, '缺拖拽区'
 assert 'id=\"go\"' in h, '缺转换按钮'
 assert 'id=\"tplFile\"' in h, '缺自定义模板上传'
+# 右上角仓库入口 + 「继续添加 md 文件」提示（用户要求）
+assert 'github.com/BoHaoZhang-CSU/mdthesis' in h, '右上角缺仓库链接'
+assert '继续添加 md 文件' in h, '缺「继续添加 md 文件」提示（要提示是 md）'
+# 添加区必须在文件列表**下面** —— 加过文件后视觉重心是列表本身（用户要求）
+assert h.find('id=\"list\"') < h.find('id=\"drop\"'), '添加区跑到文件列表上面去了'
 assert 'X-Report' in h, '前端没读自动修复报告'
 assert '识别结果' in h, '前端没有展示「识别结果」（读到了什么）'
 # 转换完成后要自动触发下载，不该让用户再点一次

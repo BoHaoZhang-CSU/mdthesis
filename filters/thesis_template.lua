@@ -35,7 +35,7 @@
 
 -- 这次转换做了什么改动，最后汇总报告给调用方（网页界面会展示给用户看）。
 -- 必须声明在所有用到它的函数之前 —— Lua 的 local 没有提升。
-local stats = { stripped = 0, hr_dropped = 0, h1_demoted = 0, toc_dropped = 0 }
+local stats = { stripped = 0, hr_dropped = 0, h1_demoted = 0, toc_dropped = 0, delims = 0 }
 
 --[[
   角色样式映射（由 tools/prepare_template.py 生成，convert.sh 通过环境变量传进来）。
@@ -539,6 +539,102 @@ local function list_items(items)
   return s
 end
 
+--[[
+  括号自适应（2026-10-15 夜，用户报的）。
+
+  LaTeX 里**普通** `[ ]` `( )` 不会随内容变高，pandoc 就生成普通字符 run；
+  里面装着分式/求和这类「高个子」时括号框不住内容，看着像排版错了 ——
+  向量/矩阵里带分式最容易露馅：
+      φ_d(k)=[ i_d(k), −ω_e(k)i_q(k), (i_d(k+1)−i_d(k))/T_s ]^T
+  紧贴的两个 `[ ]` 只有一行字高，中间那个分式是它的三倍。
+
+  改成 \left…\right 后 pandoc 会生成 <m:d> + <m:grow>，Word/WPS 自动拉伸括号。
+
+  判断保持保守，避免改坏本来正常的公式：
+    · [ ] 与 ( ) 分开配对，数量必须相等、按出现顺序配（LaTeX 的 \left/\right 就是这么配的）
+    · 括号内部 { } 必须平衡 —— \left/\right 不能跨组，跨了 LaTeX 会报错
+    · **只有内部出现「高个子」记号时才动**：普通写法（x[i]、(k+1)）一律不碰
+    · 已经写着 \left/\right 的不碰（不重复标记）
+]]
+local TALL_TOKENS = {
+  "\\frac", "\\dfrac", "\\tfrac", "\\binom", "\\genfrac", "\\sqrt",
+  "\\sum", "\\prod", "\\coprod", "\\int", "\\iint", "\\iiint", "\\oint",
+  "\\bigcup", "\\bigcap", "\\substack", "\\stackrel",
+  "\\overline", "\\underline", "\\overbrace", "\\underbrace", "\\begin{",
+}
+
+local function has_tall(inner)
+  for _, tok in ipairs(TALL_TOKENS) do
+    if inner:find(tok, 1, true) then return true end
+  end
+  return false
+end
+
+local function braces_balanced(inner)
+  local depth, i = 0, 1
+  while i <= #inner do
+    local c = inner:sub(i, i)
+    if c == "\\" then
+      local cmd = inner:match("^\\[a-zA-Z]+", i)
+      i = i + (cmd and #cmd or 2)     -- \frac / \} 这类整体跳过
+    else
+      if c == "{" then depth = depth + 1
+      elseif c == "}" then depth = depth - 1 end
+      if depth < 0 then return false end
+      i = i + 1
+    end
+  end
+  return depth == 0
+end
+
+local function promote_delimiters(s)
+  local n_pairs = 0
+  for _, ab in ipairs({ { "[", "]" }, { "(", ")" } }) do
+    local open, close = ab[1], ab[2]
+    local ops, cls = {}, {}
+    local i = 1
+    while i <= #s do
+      local c = s:sub(i, i)
+      if c == "\\" then
+        local cmd = s:match("^\\[a-zA-Z]+", i)
+        if cmd then
+          i = i + #cmd
+          -- \left[ / \right] 里那个括号已经标记过了，别重复收
+          if (cmd == "\\left" or cmd == "\\right") and s:sub(i, i) == open then
+            i = i + 1
+          end
+        else
+          i = i + 2                     -- \{ 这类转义字符
+        end
+      else
+        if c == open then ops[#ops + 1] = i
+        elseif c == close then cls[#cls + 1] = i end
+        i = i + 1
+      end
+    end
+
+    if #ops > 0 and #ops == #cls then
+      local edits = {}
+      for k = 1, #ops do
+        local a, b = ops[k], cls[k]
+        if b > a + 1 then
+          local inner = s:sub(a + 1, b - 1)
+          if has_tall(inner) and braces_balanced(inner) then
+            edits[#edits + 1] = { a, b }
+          end
+        end
+      end
+      for k = #edits, 1, -1 do        -- 从右往左替换，位置不会互相影响
+        local a, b = edits[k][1], edits[k][2]
+        s = s:sub(1, a - 1) .. "\\left" .. open .. s:sub(a + 1, b - 1)
+            .. "\\right" .. close .. s:sub(b + 1)
+        n_pairs = n_pairs + 1
+      end
+    end
+  end
+  return s, n_pairs
+end
+
 -- 入口：先做各种扫描与安全校验，再转换，最后汇报做了什么
 function Pandoc(doc)
   -- 1. 资源引用安全校验 —— 必须在 writer 抓取资源之前跑
@@ -605,6 +701,14 @@ function Pandoc(doc)
     OrderedList = OrderedList,
     BulletList = BulletList,
     Blocks = Blocks,
+    Math = function(el)
+      local new, n = promote_delimiters(el.text)
+      if n > 0 then
+        el.text = new
+        stats.delims = stats.delims + n
+      end
+      return el
+    end,
   })
 
   -- 6. 汇报自动做的改动 —— 用户不需要操作，但有权知道
@@ -626,6 +730,11 @@ function Pandoc(doc)
   end
   if stats.h1_demoted > 0 then
     note("change", string.format("把 %d 个多余的一级标题降级成了二级标题 ##", stats.h1_demoted))
+  end
+  if stats.delims > 0 then
+    note("change", string.format(
+      "修正了 %d 处公式括号：普通 [ ] ( ) 不会随内容变高，里面装着分式时括号框不住 —— "
+        .. "已改成自适应高度（\\left…\\right）", stats.delims))
   end
 
   -- 7. 识别结果：让用户一眼看出「我们从他文档里读到了什么」，识别错了当场就能发现
