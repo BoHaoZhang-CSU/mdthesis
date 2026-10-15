@@ -1,0 +1,24 @@
+# 测试产物
+tests/.out/
+tests/*.docx
+tests/*.pdf
+
+# Python
+__pycache__/
+*.py[cod]
+
+# 成品模板 —— 核心资产，不公开。使用者需自备（见 assets/templates/README.md）
+assets/templates/*.docx
+
+# 模板的来源文件 —— 加工模板的原料，属于核心资产，不公开
+assets/sources/
+
+# 测试夹具 —— 从模板派生出来的，同样含模板样式内容
+tests/fixtures/*.docx
+
+# 模板加工时生成的中间文件（每次加工模板都会重新生成）
+assets/templates/*.map.json
+
+# 编辑器 / 系统
+*.swp
+.DS_Store

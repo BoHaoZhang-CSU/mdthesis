@@ -1,0 +1,38 @@
+pandoc — 版权与许可证声明
+================================================================
+
+本镜像包含 pandoc 的二进制副本。
+
+  名称:     pandoc
+  版本:     3.7.0.2
+  版权:     Copyright (C) 2006-2024 John MacFarlane
+  许可证:   GNU General Public License, version 2 或更高版本
+            （部分文件为 GPL version 3 或更高版本）
+  主页:     https://pandoc.org/
+  对应源码: https://github.com/jgm/pandoc/releases/tag/3.7.0.2
+
+分发形式：pandoc 官方发布的、**未经修改**的 Linux arm64 静态二进制
+（pandoc-3.7.0.2-linux-arm64.tar.gz），安装在 /usr/local/bin/pandoc。
+
+----------------------------------------------------------------
+许可证全文
+----------------------------------------------------------------
+
+GPL-2.0 的完整文本在本镜像的以下位置：
+
+  /usr/share/common-licenses/GPL-2      （Debian 基础镜像自带）
+
+也可在本项目的 LICENSE 文件中找到，或访问：
+  https://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+
+pandoc 的完整版权与许可信息（含 GPL-3 部分）见上游：
+  https://github.com/jgm/pandoc/blob/master/COPYING.md
+
+----------------------------------------------------------------
+源码获取
+----------------------------------------------------------------
+
+pandoc 的完整源码以自由软件方式提供。你也可以从上述 GitHub 仓库
+获取与 3.7.0.2 版本对应的源码。
+
+本项目的源码：见本镜像 /app 目录，或项目仓库。

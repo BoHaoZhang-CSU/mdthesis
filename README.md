@@ -1,0 +1,325 @@
+# pandoc-web
+
+把 markdown 转换成符合论文模板排版的 Word 文档（.docx）。
+
+核心思路：**用户内容一个字不改**，所有模板适配逻辑放在 Lua filter 里；版式（章节编号、分页、
+字体）由 Word 模板的样式驱动。
+
+---
+
+## 依赖
+
+| 组件 | 版本 | 用途 | 是否必需 |
+|---|---|---|---|
+| `pandoc` | **3.7.x** | 转换引擎 | 必需 |
+| `python3` | 3.8+ | 后处理脚本（仅用标准库） | 必需 |
+| `libreoffice` | 任意较新版本 | 仅当输入是旧式 `.doc` 时需要先转 `.docx` | 可选 |
+
+> ⚠️ **pandoc 版本请保持 3.7.x**。filter 依赖的具体行为（例如 `pandoc.Para` 没有 `.attr` 字段）
+> 在其他大版本上可能不同。迁移到新机器后**务必跑一遍回归测试**。
+
+Ubuntu/Debian 安装：
+
+```bash
+sudo apt install pandoc python3
+sudo apt install libreoffice-writer      # 可选，仅 .doc 输入需要
+```
+
+---
+
+## ⚠️ 先准备模板
+
+**本仓库不附带 Word 模板** —— 模板是需要自行准备的资产。
+
+把 `.docx` 放进 `assets/templates/`，加工一次即可：
+
+```bash
+python3 tools/prepare_template.py 你的模板.docx assets/templates/你的模板.docx
+```
+
+- 模板必须有 **`heading 2`** 样式（章节用），否则加工会直接报错并说明原因
+- 章节样式的大纲级别建议设对 —— 这样即使样式名是自定义的（如「一级标题」）也能自动识别
+- 大标题 / 摘要 / 目录标题的样式缺了会自动补齐，表格样式会按模板声明渲染三线表
+
+详见 [`assets/templates/README.md`](assets/templates/README.md)。
+
+## 快速开始
+
+```bash
+# 用 assets/templates/ 里的模板（放哪个名字就用哪个）
+./tools/convert.sh 你的文档.md 输出.docx
+
+# 换模板（把新模板放进 assets/templates/ 后）
+./tools/convert.sh 你的文档.md 输出.docx assets/templates/别的模板.docx
+
+# 或用环境变量
+THESIS_TEMPLATE=/path/to/模板.docx ./tools/convert.sh 你的文档.md 输出.docx
+```
+
+**markdown 怎么写见 [`docs/markdown-规范.md`](docs/markdown-规范.md)** ——
+那份文档里还有一段可直接复制给 AI 的提示词，用来把不合规的 md 改写成合规版本。
+
+> 不过走 HTTP 服务时**不需要用户自己改** —— `/convert` 会先自动修复再转换。
+> 规范文档主要给命令行用户和 API 调用方参考。
+
+---
+
+## 目录结构
+
+```
+pandoc-web/
+├── assets/
+│   ├── templates/
+│   │   └── 毕业论文通用模板.docx   ← 唯一的模板，转换默认用它
+│   └── sources/
+│       └── 凝视与回应_论文润色完善版.docx  原始素材（重新加工模板时才用得到）
+├── app/                    HTTP 服务（FastAPI）
+│   ├── main.py             路由
+│   ├── convert.py          调 tools/convert.sh + 自动修复
+│   ├── normalize.py        markdown 修复逻辑
+│   ├── validate.py         上传校验（zip 加固）
+│   ├── limits.py           并发闸门
+│   └── static/index.html   中文网页面板
+├── deploy/
+│   └── docker-compose.yml  纯运行版 compose（给老 Docker 的目标机用）
+├── docs/
+│   └── markdown-规范.md     书写规范 + 给 AI 的提示词
+├── filters/
+│   └── thesis_template.lua  模板适配逻辑（改行为改这里）
+├── tools/
+│   ├── convert.sh           一键流程 ← CLI 主入口
+│   ├── prepare_template.py  从原始模板加工出 pandoc 专用模板
+│   └── strip_unused_media.py 剥离 pandoc 带入的无用图片（安全网）
+└── tests/
+    ├── 论文1.md / .docx      主用例与产出
+    ├── 论文1_预览.pdf        渲染预览（LibreOffice 转的，仅供参考）
+    ├── cases/               11 个刁钻边界用例
+    └── regression.sh        回归测试，49 项断言
+```
+
+---
+
+## filter 做了什么
+
+`filters/thesis_template.lua` 负责把 markdown 的层级映射到模板样式：
+
+| markdown | 输出 |
+|---|---|
+| `# 标题`（全文仅一个） | 「摘要上标题」样式，18pt 黑体居中，不编号 |
+| `## 摘要` | 「摘要」样式，**脱离自动编号序列** |
+| `## 引言` | `heading 2` → Word 自动生成「第N章 引言」，每章另起一页 |
+| `### 研究背景` | `heading 3` → 自动生成「N.M 研究背景」 |
+| `## 参考资料` 下的列表 | 拆成普通段落 + `[N]` 前缀 |
+| `---` | 紧挨标题的丢弃；其余渲染成段落下边框横线 |
+
+**多个 `#` 时会输出警告**，提示用户修改 markdown（不猜哪个是论文大标题）。
+
+---
+
+## 换模板怎么办
+
+```bash
+# 1. 把新模板的原始文件放进 assets/sources/
+# 2. 加工成 pandoc 专用模板
+python3 tools/prepare_template.py assets/sources/新模板.docx assets/templates/新模板_pandoc.docx
+# 3. 转换时指定
+./tools/convert.sh 文档.md 输出.docx assets/templates/新模板_pandoc.docx
+```
+
+`prepare_template.py` 会做两件事：给 `heading 2` 加 `pageBreakBefore`（每章另起一页）、
+剥掉模板自带图片。**如果新模板的样式名不是标准的 `heading 2`**，可能需要调整该脚本或 filter。
+
+---
+
+## 测试
+
+```bash
+./tests/regression.sh          # 跑全部（10 个边界用例 + 主文档基线）
+./tests/regression.sh T1 T4    # 只跑名字含 T1/T4 的
+```
+
+改完 `filters/` 或 `tools/` 后**务必跑一遍**。
+
+找不到模板时，测试会用 **pandoc 自带的中性模板**临时生成一份来跑
+（生成物在 `tests/.out/.demo/`，不进仓库）—— 这样 clone 下来就能验证功能。
+这种情况下依赖特定模板版式的基线断言会跳过，并有明确提示。
+
+---
+
+## HTTP 服务
+
+```bash
+docker compose up -d --build
+./tests/api_smoke.sh http://127.0.0.1:8000
+```
+
+接口：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/health` | 探针 + pandoc 版本 + 可用模板 |
+| GET | `/templates` | 列出内置模板 |
+| POST | `/check` | 只校验，返回告警 / 修复建议 / 猜测说明 |
+| POST | `/normalize` | 自动修复 markdown 并返回修好的内容 |
+| POST | `/convert` | 上传 md（+可选模板）→ 返回 docx |
+
+告警通过响应头返回：`X-Warnings-Count`（条数）+ `X-Warnings`（base64 JSON，仅在较短时带上）。
+**全文告警请用 `/check`** —— 头部只放有界摘要，避免随用户输入无限膨胀。
+
+环境变量（都有保守默认值，部署机 6GB 内存就按默认走）：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `MAX_CONCURRENT` | 1 | 同时进行的转换数。pandoc 单次峰值约 140MB，别往大开 |
+| `MAX_QUEUE` | 8 | 排队上限，超了直接 503 |
+| `CONVERT_TIMEOUT` | 120 | 单次转换超时（秒） |
+| `WORK_ROOT` | `/work` | 请求工作目录，**必须落在磁盘上**，见下 |
+| `BLOCK_NETWORK` | 1 | 把子进程代理指向死地址，禁掉出网 |
+
+### 验证（三层，都在本机实测通过）
+
+```bash
+./tests/regression.sh                                   # ① CLI 层：55 项
+./tests/api_smoke.sh http://127.0.0.1:8000              # ② HTTP 层：20 项
+docker compose exec -T pandoc-web ./tests/regression.sh # ③ 容器内：55 项
+```
+
+> `regression.sh` 在容器里会自动把输出目录降级到 `/work`（根文件系统是只读的），
+> 看到「`/app/tests/.out` 不可写」这句是正常的。
+
+**等价性检查**：容器产出的 docx 与宿主机产出的，除 `docProps/core.xml`（含时间戳）外
+**逐部件字节相同**，说明容器环境与开发环境行为一致。
+
+### 迁移到另一台机器
+
+**目标机是 Debian 11，docker.io 是 20.10 那一代**，所以：
+
+- 构建时**关掉了 provenance/SBOM attestation**（compose 里 `provenance: false`），
+  否则老 Docker 不认新格式的 manifest。已验证 `docker save` 产物根目录有
+  `manifest.json`（经典格式），20.10 能 load。
+- 磁盘只剩约 4.3 GB，够用（镜像 484 MB + tar 95 MB），但**导入完记得删掉 tar**。
+
+```bash
+# 源机（本机）
+sg docker -c "docker save pandoc-web:0.1.0" | gzip > pandoc-web-0.1.0.tar.gz   # 约 91 MB
+scp -r pandoc-web-0.1.0.tar.gz deploy/ radxa@<a7s-ip>:~/
+
+# 目标机
+gunzip -c pandoc-web-0.1.0.tar.gz | docker load
+docker-compose -f deploy/docker-compose.yml up -d
+rm pandoc-web-0.1.0.tar.gz
+docker-compose -f deploy/docker-compose.yml exec -T pandoc-web ./tests/regression.sh
+```
+
+**为什么目标机用 `deploy/docker-compose.yml` 而不是根目录那份**：
+Debian 11 的 `docker-compose` 是 1.25（v1），根目录那份含 `build.provenance`/`sbom`
+（新版 compose spec 才有的 key），v1 会报「Unsupported config option」。
+`deploy/` 那份是**纯运行版**（没有 build 段）+ `version: "2.4"`，兼容 v1。
+（新版 compose 会提示 `version` 已废弃 —— 正常，别删。）
+
+**目标机还需要**：Docker（Debian 11 用 `sudo apt install docker.io docker-compose`，
+注意命令是带连字符的 `docker-compose` 而非 `docker compose` 插件）、当前用户加入 `docker` 组。
+
+### 基座选型：为什么是 Debian 12
+
+**目标机实测**：`sun60iw2`（Allwinner A733）/ Debian 11.11 bullseye / **内核 5.15.147** /
+5.8 GB 内存 / 29 GB 磁盘已用 85% / aarch64。
+
+容器共享**宿主机内核**，只有用户态来自镜像。所以看的是"镜像用户态能不能在这个内核上跑"：
+
+| 基座 | glibc | Python | 结论 |
+|---|---|---|---|
+| `ubuntu:26.04` | 2.43 | 3.12 | glibc 2.43 的内核底线查不到确切值 —— 不赌 |
+| **`debian:12`** | **2.36** | **3.11** | ✅ 5.15 内核远高于它要求的（4.19+） |
+| `debian:11` | 2.31 | **3.9** | ❌ 代码用了 `X \| None` 类型标注，**需要 3.10+** |
+
+内核 5.15 其实不算老（2021 年的 LTS），所以基座选择的顾虑不大；
+**真正把 Debian 11 排除掉的是 Python 版本** —— bullseye 只有 3.9。
+
+pandoc 用官方**静态** arm64 二进制（精确钉在 3.7.0.2），**连 glibc 都不依赖**。
+
+### 镜像体积（对磁盘紧张的部署机很重要）
+
+| | 磁盘 | 传输包 |
+|---|---|---|
+| 初始版本 | 900 MB | 170 MB |
+| 修正后 | **484 MB** | **95 MB** |
+
+省下来的空间来自一处浪费：pandoc 的 tarball 里 `bin/pandoc`、`bin/pandoc-lua`、
+`bin/pandoc-server` 是**同一个 165MB 二进制**（md5 完全相同），早先 `install .../bin/*`
+把它拷了三份。现在只装 `pandoc`。
+
+### 构建时的代理
+
+构建要访问 GitHub（下 pandoc）和 PyPI。`compose` 里已经配好：
+
+```yaml
+build:
+  network: host        # 让构建容器用宿主机网络栈
+  args:
+    HTTP_PROXY: ${BUILD_HTTP_PROXY:-http://127.0.0.1:7897}
+```
+
+目标机若能直连外网，把 `network: host` 和 `args` 那几行删掉即可。
+
+**注意**：`dockerd` 自己拉镜像的代理是另一套配置，在
+`/etc/systemd/system/docker.service.d/http-proxy.conf`。两处都配好才顺。
+
+---
+
+## 许可证
+
+本项目以 **GPL-2.0-or-later** 发布，见 [`LICENSE`](LICENSE)。
+
+它依赖并在 Docker 镜像里**再分发** pandoc（**GPL-2.0-or-later**），
+第三方组件的版权、许可证与源码获取方式见 [`THIRD-PARTY.md`](THIRD-PARTY.md)。
+镜像内也附了一份，位置是 `/usr/share/doc/pandoc-web/`，以及
+`/usr/share/doc/pandoc/copyright`。
+
+**关于商用**：GPL 不禁止收费，只要求「分发二进制时提供源码」。
+**只提供网页服务**（用户拿不到二进制）时该义务不触发 —— 这也是本项目推荐的形态。
+若要闭源分发，见 `THIRD-PARTY.md` 末尾的说明。
+
+> 以上为工程判断，不构成法律意见。正式商用建议咨询专业人士。
+
+---
+
+## ⚠️ 安全须知
+
+### markdown 的图片语法原本是「任意文件读 + SSRF」原语
+
+pandoc 对图片引用**不做任何路径校验**。实测：
+
+```
+![x](/etc/hostname)          → 文件内容被原样嵌进 docx，退出码 0，零警告
+![x](http://internal/secret) → 真的发起 HTTP 请求
+![x](../../README.md)        → 相对穿越，同样读得到
+```
+
+在服务端这就是漏洞：上传者能把服务器文件下载走，也能探测内网。
+`--resource-path` 挡不住绝对路径，`--sandbox` 在本发行版不可用 —— **pandoc 没有开关能关掉它**。
+
+**本项目的对策**（filters/thesis_template.lua 里的资源校验 pass）：
+默认拦截外部协议、绝对路径、UNC、相对穿越的图片；链接拦 `file://` 和本地路径
+（那会把 SSRF 转嫁给打开文档的人）。拦截时替换成 alt 文本并告警。
+本地转换自己的文档可以设 `THESIS_ALLOW_EXTERNAL_RESOURCES=1` 放行。
+
+### 其他
+
+- 服务端还额外设了 `http_proxy=http://127.0.0.1:1` 断掉子进程出网，作为纵深防御
+- `-f markdown-raw_attribute` 禁掉了 `{=openxml}` —— 否则用户能往 `document.xml` 塞任意 OOXML
+- 用户上传的 docx 模板在 `app/validate.py` 里做 zip 层面校验（炸弹、路径穿越、条目数）
+- **容器里不要放任何秘密** —— 万一资源拦截被绕过，容器内文件是可读的
+- 服务默认只绑 `127.0.0.1`。要对外提供必须先加鉴权，这是个吃内存的接口
+
+---
+
+## 已知问题
+
+- **摘要过长会留白**：若「大标题 + 摘要 + 关键词」超过一页，关键词会溢到第 2 页，
+  而第 1 章强制另起一页 → 第 2 页大面积留白。属于内容长度问题，压缩摘要即可。
+- **相对路径图片依赖工作目录**：pandoc 解析 `![](figs/a.png)` 时以**子进程 cwd** 为基准。
+  服务端已经把 cwd 切到请求目录，但**用户上传的 md 里带的图片文件目前进不来** ——
+  接口只收单个 `.md`。要支持带图文档需要改成收 zip 包（尚未实现）。
+- **加工后的模板自身** `document.xml` 里有指向已删图片的悬空引用 —— 无害，
+  因为 pandoc 只用模板的 styles/settings，不用模板正文。

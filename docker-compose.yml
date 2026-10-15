@@ -1,0 +1,86 @@
+# pandoc-web 服务
+#
+# 起服务:  docker compose up -d --build
+# 看日志:  docker compose logs -f
+# 冒烟:    ./tests/api_smoke.sh http://127.0.0.1:8000
+#
+# 资源限制是照着「部署机 6GB 内存」定的。pandoc 单次转换峰值约 140MB，
+# 但机器本身已经在重度 swap，所以并发锁死 1，容器内存上限 1GB 兜底。
+
+services:
+  pandoc-web:
+    build:
+      context: .
+      # 目标部署机是 Debian 11，其 docker.io 是 20.10 那一代，**不认识新版 BuildKit
+      # 默认附带的 provenance / SBOM attestation manifest** —— 那样 docker load
+      # 会失败或行为诡异。关掉，保证导出的是经典镜像格式。
+      provenance: false
+      sbom: false
+      # 构建需要访问 GitHub（下 pandoc）和 PyPI。
+      # network: host 让构建容器和宿主机共用网络栈 —— 这样 build-arg 里的
+      # 127.0.0.1:7897 才是宿主机的代理，而不是构建容器自己的回环。
+      # 目标机若能直连外网，可以把这几行和上面的 args 都删掉。
+      network: host
+      args:
+        HTTP_PROXY: ${BUILD_HTTP_PROXY:-http://127.0.0.1:7897}
+        HTTPS_PROXY: ${BUILD_HTTPS_PROXY:-http://127.0.0.1:7897}
+        NO_PROXY: localhost,127.0.0.1,::1
+    image: pandoc-web:0.1.0
+    container_name: pandoc-web
+
+    # 只绑本机。要给别的机器用，改成 "0.0.0.0:8000:8000"，
+    # 但请先补上鉴权 —— 这是个能吃内存的转换接口。
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    # --- 资源闸门 ---
+    mem_limit: 1g
+    memswap_limit: 1g     # 与 mem_limit 相等 = 容器内禁用 swap。
+                          # 这台机器 swap 已在重度使用，容器一旦可换页会拖垮全机；
+                          # 宁可让容器 OOM 被杀（有 restart 兜底）。
+    pids_limit: 64        # 防 fork 炸弹。主机 ulimit -u 是 30719，本身没有保护。
+
+    # 注意：这里**不要**写 cpus / cpu_quota。本机 system.slice 没有启用 cpu 控制器
+    # （cgroup.controllers 里只有 cpuset io memory hugetlb pids rdma misc dmem），
+    # 设置 CPU 限额会直接让容器起不来：
+    #   openat2 .../cpu.max: no such file or directory
+    # CPU 本身不是瓶颈（MAX_CONCURRENT=1 已经把它框住了）。
+    # 若确实要限，用 systemd 给守护进程降权：
+    #   sudo systemctl set-property docker.service CPUWeight=20 IOWeight=20
+
+    # --- 安全 ---
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      # 容器里的 /tmp 默认也是 tmpfs（默认上限是内存的一半！）。
+      # 显式限到 64MB，并且真正的工作目录在 /work（磁盘卷）。
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+
+    volumes:
+      - work:/work
+
+    environment:
+      WORK_ROOT: /work
+      HOME: /work
+      MAX_CONCURRENT: "1"
+      MAX_QUEUE: "8"
+      CONVERT_TIMEOUT: "120"
+      # 禁掉出网（纵深防御）。filter 已经拦了外部图片/链接，
+      # 这里再把代理指向死地址，万一 filter 有绕过也打不出去。
+      BLOCK_NETWORK: "1"
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  work:

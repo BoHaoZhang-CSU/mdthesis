@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Markdown 转毕业论文 Word</title>
+<style>
+  :root {
+    --bg:#ffffff; --ink:#1a1a1a; --muted:#6e6e73;
+    --line:#d8dade; --soft:#fafafa;
+    --accent:#8b1a1a; --accent-h:#6f1414;
+    --ok:#166534; --warn:#92400e; --err:#9b1c1c;
+  }
+  /* 全站不使用圆角 —— 直角更克制、更像正式工具 */
+  * { box-sizing:border-box; border-radius:0; }
+  body {
+    margin:0; padding:56px 24px 96px; color:var(--ink); background:var(--bg);
+    font:15px/1.8 -apple-system,"Noto Sans CJK SC","Source Han Sans SC",
+         "Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap { max-width:660px; margin:0 auto; }
+
+  /* 标题只作标识，不跟内容抢视线 */
+  h1 {
+    font-size:16px; font-weight:600; letter-spacing:1px;
+    margin:0 0 24px; padding-bottom:12px; border-bottom:2px solid var(--ink);
+  }
+
+  .card { padding:0; }
+
+  /* 拖拽区：空态时是页面主角（大、居中）；有文件后收成一行，
+     把视觉重心让给文件列表和转换按钮 —— 一屏只有一个重点。 */
+  #drop {
+    border:1px solid var(--line); padding:48px 24px; text-align:center;
+    cursor:pointer; transition:border-color .15s, background .15s, padding .15s;
+    background:var(--soft);
+  }
+  #drop:hover, #drop.over { border-color:var(--accent); background:#fff; }
+  #drop .big { font-size:15px; }
+  #drop .small { color:var(--muted); font-size:12.5px; margin-top:6px; }
+  #drop.compact { padding:12px 16px; text-align:left; border-top:none; background:#fff; }
+  #drop.compact .big { font-size:13px; color:var(--muted); }
+  #drop.compact .small { display:none; }
+  #drop.compact:hover { color:var(--accent); }
+
+  #list { margin-top:0; border:1px solid var(--line); border-top:none; }
+  #list:empty { display:none; border:none; }
+  .item {
+    display:flex; align-items:center; gap:12px;
+    padding:12px 16px; font-size:14px;
+    border-bottom:1px solid var(--line);
+  }
+  .item:last-child { border-bottom:none; }
+  .item:hover { background:var(--soft); }
+  .item input[type=checkbox] { width:15px; height:15px; flex:none; cursor:pointer;
+                               accent-color:var(--accent); }
+  .item .name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis;
+                white-space:nowrap; }
+  .item .meta { flex:none; color:var(--muted); font-size:12.5px; }
+  .item.done .name { color:var(--muted); }
+  .item.done .name::after { content:" 已转换"; color:var(--ok); font-size:12px; }
+  .item .x { flex:none; color:#c9ccd1; cursor:pointer; font-size:16px; line-height:1;
+             padding:0 2px; }
+  .item .x:hover { color:var(--err); }
+
+  /* 主动作按钮：整页最重的一块。有文件时它才是焦点。 */
+  #go {
+    display:block; width:100%; margin-top:16px; padding:16px;
+    font:inherit; font-size:16px; font-weight:600; letter-spacing:1.5px;
+    color:#fff; background:var(--accent); border:1px solid var(--accent);
+    cursor:pointer; transition:background .15s;
+  }
+  #go:hover:not(:disabled) { background:var(--accent-h); border-color:var(--accent-h); }
+  #go:disabled { background:#eceef1; border-color:var(--line); color:#a8adb5;
+                 cursor:not-allowed; }
+
+  .foot {
+    margin-top:28px; padding-top:16px; border-top:1px solid var(--line);
+    font-size:12.5px; color:var(--muted);
+    display:flex; align-items:center; justify-content:space-between; gap:12px;
+    flex-wrap:wrap;
+  }
+  .foot b { color:var(--ink); font-weight:500; }
+  .foot input[type=file] { display:none; }
+  .link { color:var(--accent); cursor:pointer; }
+  .link:hover { text-decoration:underline; }
+
+  /* 状态区：成功只给一行，细节默认收起。失败才摊开。 */
+  #status { margin-top:16px; font-size:12.5px; line-height:1.8; color:var(--muted); }
+  #status:empty { display:none; }
+  #status .line { padding:2px 0; }
+  #status .line.ok  { color:var(--ok); }
+  #status .line.err { color:var(--err); }
+  #status .line.ok::before  { content:"✓ "; }
+  #status .line.err::before { content:"✕ "; }
+  #status .tog { color:var(--muted); cursor:pointer; text-decoration:underline;
+                 font-size:12px; }
+  #status .tog:hover { color:var(--ink); }
+  #status .flag { color:var(--warn); font-size:12px; }
+  #status .more { padding:6px 0 2px 14px; border-left:2px solid var(--line);
+                  margin-left:2px; }
+  #status .more ul { margin:2px 0 4px; padding-left:18px; }
+  #status .more li { margin:2px 0; }
+  #status .more b { color:var(--ink); font-weight:500; }
+  #status a { color:var(--accent); }
+  #status .fname { color:var(--ink); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Markdown 转毕业论文 Word</h1>
+
+  <div class="card">
+
+    <div id="drop">
+      <div class="big">拖拽 .md 文件到这里，可以一次拖多个</div>
+      <div class="small">也可以点击选择文件</div>
+    </div>
+    <input type="file" id="mdFile" accept=".md,.markdown,.txt" multiple hidden>
+
+    <div id="list"></div>
+
+    <button id="go" disabled>转换并下载 Word</button>
+
+    <div class="foot">
+      <span id="tplName">模板加载中…</span>
+      <span>
+        <input type="file" id="tplFile" accept=".docx">
+        <a class="link" id="tplPick">用自己的模板</a>
+        <a class="link" id="tplReset" style="display:none">改回默认</a>
+      </span>
+    </div>
+
+    <div id="status"></div>
+
+  </div>
+
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let queue = [];              // {id, file, name, addedAt, checked, done}
+let seq = 0, tplFile = null, defaultTpl = '', running = false;
+
+const drop = $('drop');
+const listEl = $('list');
+const goBtn = $('go');
+
+/* ---------- 选文件 ---------- */
+drop.onclick = () => $('mdFile').click();
+$('mdFile').onchange = () => {
+  addFiles($('mdFile').files);
+  $('mdFile').value = '';
+};
+
+function isMd(f) { return f && /\.(md|markdown|txt)$/i.test(f.name); }
+
+/* 同名文件自动加 (2)(3) 后缀 —— 用户经常会重复拖同一个文件，
+   不加的话列表里分不清，下载下来的 docx 也会互相覆盖。 */
+function uniqueName(name) {
+  const taken = new Set(queue.map(q => q.name));
+  if (!taken.has(name)) return name;
+  const dot = name.lastIndexOf('.');
+  const base = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : '';
+  for (let i = 2; ; i++) {
+    const cand = base + ' (' + i + ')' + ext;
+    if (!taken.has(cand)) return cand;
+  }
+}
+
+function addFiles(fileList) {
+  let n = 0;
+  for (const f of fileList) {
+    if (!isMd(f)) continue;
+    queue.push({ id: ++seq, file: f, name: uniqueName(f.name),
+                 addedAt: Date.now(), checked: true, done: false });
+    n++;
+  }
+  if (n) { $('status').innerHTML = ''; render(); }
+}
+
+// 拖拽绑在**整个页面**上 —— 只绑方框的话，用户拖到框外浏览器会直接打开文件，
+// 页面跳走，只能刷新回来（用户报过）。
+for (const t of ['dragenter', 'dragover']) {
+  window.addEventListener(t, e => { e.preventDefault(); drop.classList.add('over'); });
+}
+window.addEventListener('dragleave', e => {
+  if (!e.relatedTarget) drop.classList.remove('over');
+});
+window.addEventListener('drop', e => {
+  e.preventDefault();
+  drop.classList.remove('over');
+  if (e.dataTransfer) addFiles(e.dataTransfer.files);
+});
+
+/* ---------- 相对时间 ---------- */
+function ago(ts) {
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 60) return '刚刚';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + ' 分钟前';
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + ' 小时前';
+  return Math.floor(h / 24) + ' 天前';
+}
+
+/* ---------- 渲染队列 ---------- */
+function render() {
+  queue.sort((a, b) => b.addedAt - a.addedAt);
+
+  // 焦点切换：没文件时拖拽区是主角；有文件后收成一行，让位给列表和按钮
+  const compact = queue.length > 0;
+  drop.classList.toggle('compact', compact);
+  if (drop.dataset.mode !== String(compact)) {
+    drop.dataset.mode = String(compact);
+    drop.innerHTML = compact
+      ? '<div class="big">＋ 继续添加文件（也可以拖到页面任意位置）</div>'
+      : '<div class="big">拖拽 .md 文件到这里，可以一次拖多个</div>' +
+        '<div class="small">也可以点击选择文件</div>';
+  }
+
+  listEl.innerHTML = queue.map(it =>
+    '<div class="item' + (it.done ? ' done' : '') + '">' +
+      '<input type="checkbox" data-id="' + it.id + '"' +
+             (it.checked ? ' checked' : '') + (running ? ' disabled' : '') + '>' +
+      '<span class="name" title="' + esc(it.name) + '">' + esc(it.name) + '</span>' +
+      '<span class="meta">' + ago(it.addedAt) + '</span>' +
+      '<span class="x" data-del="' + it.id + '" title="移除">×</span>' +
+    '</div>').join('');
+
+  const picked = queue.filter(it => it.checked).length;
+  goBtn.disabled = running || picked === 0;
+  goBtn.textContent = picked > 1 ? '转换并下载 ' + picked + ' 个文件' : '转换并下载 Word';
+}
+
+listEl.addEventListener('change', e => {
+  if (e.target.type !== 'checkbox') return;
+  const it = queue.find(x => x.id === +e.target.dataset.id);
+  if (it) { it.checked = e.target.checked; render(); }
+});
+listEl.addEventListener('click', e => {
+  if (!e.target.dataset.del) return;
+  queue = queue.filter(x => x.id !== +e.target.dataset.del);
+  render();
+});
+setInterval(render, 30000);
+
+/* ---------- 模板 ---------- */
+fetch('templates').then(r => r.json()).then(d => {
+  defaultTpl = (d.templates || [])[0] || '';
+  renderTpl();
+}).catch(() => { $('tplName').textContent = '模板读取失败'; });
+
+function renderTpl() {
+  if (tplFile) {
+    $('tplName').innerHTML = '模板：<b>' + esc(tplFile.name) + '</b>';
+    $('tplPick').style.display = 'none';
+    $('tplReset').style.display = '';
+  } else {
+    $('tplName').innerHTML = defaultTpl
+      ? '模板：<b>' + esc(defaultTpl.replace(/\.docx$/i, '')) + '</b>'
+      : '没有可用模板';
+    $('tplPick').style.display = '';
+    $('tplReset').style.display = 'none';
+  }
+}
+$('tplPick').onclick = () => $('tplFile').click();
+$('tplFile').onchange = () => { const f = $('tplFile').files[0];
+                                if (f) { tplFile = f; renderTpl(); } };
+$('tplReset').onclick = () => { tplFile = null; $('tplFile').value = ''; renderTpl(); };
+
+/* ---------- 工具 ---------- */
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function download(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+  return url;
+}
+function details(items) {
+  return '<ul>' + items.map(x => '<li>' + esc(x) + '</li>').join('') + '</ul>';
+}
+
+/* ---------- 转换一个文件 ---------- */
+async function convertOne(item) {
+  const fd = new FormData();
+  fd.append('file', item.file, item.name);
+  if (tplFile) fd.append('template_file', tplFile);
+  else if (defaultTpl) fd.append('template', defaultTpl);
+
+  const r = await fetch('convert', { method: 'POST', body: fd });
+  if (!r.ok) {
+    let msg = 'HTTP ' + r.status;
+    try { const j = await r.json(); msg = j.error || msg; } catch (_) {}
+    throw new Error(msg);
+  }
+
+  let rep = { warnings: [], changes: [], guesses: [] };
+  const raw = r.headers.get('X-Report');
+  if (raw) {
+    try {
+      const bytes = Uint8Array.from(atob(raw), c => c.charCodeAt(0));
+      rep = JSON.parse(new TextDecoder('utf-8').decode(bytes));
+    } catch (_) {}
+  }
+
+  const blob = await r.blob();
+  const name = (item.name.replace(/\.(md|markdown|txt)$/i, '') || 'output') + '.docx';
+  const url = download(blob, name);       // 已经点了转换，不再让他点第二次
+  return { name, size: blob.size, url, rep };
+}
+
+/* ---------- 渲染转换结果 ----------
+   成功：只给一行「文件名（大小）」，细节收在「详情」后面。
+        有需要用户确认的地方才额外标一个 ⚠（那是可能出错的地方，不能藏）。
+   失败：直接摊开错误原因。 */
+function resultHTML(res) {
+  const nChange = (res.rep.changes || []).length;
+  const nGuess  = (res.rep.guesses || []).length;
+  const nWarn   = (res.rep.warnings || []).length;
+
+  let h = '<div class="line ok"><span class="fname">' + esc(res.name) + '</span>' +
+          '（' + (res.size/1024).toFixed(0) + ' KB）';
+  if (nGuess) h += ' <span class="flag">⚠ ' + nGuess + ' 处需确认</span>';
+  const bits = [];
+  if (nChange) bits.push(nChange + ' 处自动修正');
+  if (nWarn)   bits.push(nWarn + ' 条提示');
+  if (nGuess)  bits.push(nGuess + ' 处需确认');
+  if (bits.length) h += ' · <span class="tog">' + bits.join('，') + '</span>';
+  h += '</div>';
+
+  if (bits.length) {
+    let d = '';
+    if (nGuess)  d += '<b>需要你确认：</b>' + details(res.rep.guesses);
+    if (nWarn)   d += '<b>提示：</b>' + details(res.rep.warnings);
+    if (nChange) d += '<b>已自动修正：</b>' + details(res.rep.changes);
+    h += '<div class="more" hidden>' + d +
+         '<div><a href="' + res.url + '" download="' + esc(res.name) +
+         '">手动下载</a></div></div>';
+  }
+  return h;
+}
+
+/* ---------- 转换选中的 ---------- */
+goBtn.onclick = async () => {
+  const picked = queue.filter(it => it.checked);
+  if (!picked.length || running) return;
+
+  running = true;
+  render();
+  $('status').innerHTML = '<div class="line">正在转换…</div>';
+
+  let out = '';
+  for (const it of picked) {
+    try {
+      const res = await convertOne(it);
+      it.done = true;
+      it.checked = false;                  // 转完自动取消勾选
+      out += resultHTML(res);
+    } catch (e) {
+      out += '<div class="line err"><span class="fname">' + esc(it.name) +
+             '</span>：' + esc(e.message) + '</div>';
+    }
+    $('status').innerHTML = out;
+    render();
+    await new Promise(r => setTimeout(r, 400));   // 多个下载之间留点间隔
+  }
+
+  running = false;
+  render();
+};
+
+/* 「详情」展开/收起 —— 事件委托，免得每次重渲染都要重新绑定 */
+$('status').addEventListener('click', e => {
+  if (!e.target.classList.contains('tog')) return;
+  const more = e.target.closest('.line').nextElementSibling;
+  if (more && more.classList.contains('more')) more.hidden = !more.hidden;
+});
+</script>
+</body>
+</html>

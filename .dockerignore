@@ -1,0 +1,18 @@
+# 原始模板（4MB）只在需要重新加工模板时才用得上，运行时不需要
+assets/sources/
+
+# 测试产物与预览，镜像里不需要
+tests/.out/
+tests/*.pdf
+tests/论文1.docx
+tests/论文1_raw.docx
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 计划文件、编辑器杂项
+.plan/
+*.swp
+.DS_Store

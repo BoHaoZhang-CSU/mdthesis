@@ -1,0 +1,67 @@
+# pandoc-web —— **纯运行版** compose，给目标机用
+#
+# 为什么单独一份：
+#   目标机是 Debian 11，docker-compose 是 1.25（Python 版 v1）。根目录那份
+#   docker-compose.yml 里有 `build.provenance` / `build.sbom`，那是新版 compose spec
+#   才认识的 key，v1 会直接报「Unsupported config option」。
+#   但目标机**只需要运行，不需要构建** —— 所以这份没有 build 段，
+#   并且用 `version: "2.4"` 以兼容 docker-compose 1.25。
+#
+# 用法（在解压出来的项目目录里，或只放这一个文件也行）：
+#   docker load < pandoc-web-0.1.0.tar.gz
+#   docker-compose -f deploy/docker-compose.yml up -d
+#
+# 注：新版 compose 会提示 `version` 属性已废弃 —— 那是正常的，别删掉，
+#     docker-compose 1.25 需要它来判定用哪套 file format。
+#     （本机用新版 compose 测过，警告不影响运行。）
+
+version: "2.4"
+
+services:
+  pandoc-web:
+    image: pandoc-web:0.1.0
+    container_name: pandoc-web
+
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    # 资源闸门。pandoc 单次转换峰值约 140MB；目标机 5.8GB 内存、
+    # 但已经在跑别的东西，给它 1GB 上限兜底。
+    mem_limit: 1g
+    memswap_limit: 1g     # 与 mem_limit 相等 = 容器内禁用 swap
+    pids_limit: 64        # 防 fork 炸弹
+    # 不要写 cpus —— 若宿主 system.slice 未启用 cpu 控制器会导致容器起不来。
+
+    # 安全
+    read_only: true
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+
+    volumes:
+      - pandoc-work:/work
+
+    environment:
+      WORK_ROOT: /work
+      HOME: /work
+      MAX_CONCURRENT: "1"
+      MAX_QUEUE: "8"
+      CONVERT_TIMEOUT: "120"
+      BLOCK_NETWORK: "1"
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  pandoc-work:
