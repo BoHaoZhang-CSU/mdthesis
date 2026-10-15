@@ -27,6 +27,17 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+# --- 限流（公网部署防白刷）---
+# 经过 frp TCP 隧道时拿不到真实 IP，所有请求会挤成一个桶，
+# 那时 per_ip 这层失效、只剩下 per_global 兜底 —— 所以全局值要给得够用又不失控。
+# 数值取的是「覆盖真实批量场景、但能挡住脚本刷」：
+#   40 次/分钟 ≈ 连续转 40 个文件（约 1 分钟转完）—— 够老师批改一个班
+#   80 次/分钟 ≈ 3M 带宽能承载的量级，再多也是带宽先饱和
+# 真正兜底的是带宽 + 并发闸门（MAX_CONCURRENT/MAX_QUEUE），限流只是补一层
+RATE_WINDOW = _int("RATE_WINDOW", 60)        # 时间窗（秒），窗口滑动自动过期
+RATE_PER_IP = _int("RATE_PER_IP", 40)        # 每个 IP 每窗口最多几次
+RATE_GLOBAL = _int("RATE_GLOBAL", 80)        # 全站每窗口最多几次
+
 # --- 并发与超时（内存紧张，默认串行）---
 MAX_CONCURRENT = _int("MAX_CONCURRENT", 1)
 MAX_QUEUE = _int("MAX_QUEUE", 8)  # 排队超过这个数直接返回 503，不无限堆请求

@@ -8,12 +8,13 @@
 import base64
 import json
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from . import config, convert, normalize
 from .limits import Busy, limiter
+from .ratelimit import limiter as rate_limiter
 from .validate import UploadError, check_docx_safety, check_md_size
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -46,6 +47,25 @@ async def _convert_error(_req, exc: convert.ConvertError):
     if exc.detail:
         body["detail"] = exc.detail
     return JSONResponse(body, status_code=exc.status)
+
+
+def _client_ip(request) -> str:
+    """取客户端 IP。
+
+    直连或用 frp http 模式时有 X-Forwarded-For；frp **tcp** 模式下拿不到，
+    全部是 127.0.0.1 —— 那时按 IP 这层退化成全局那层（ratelimit.py 有说明）。
+    """
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _check_rate(request) -> None:
+    """限流检查，超了抛 429。受保护的端点进来先调它。"""
+    ok, why = rate_limiter.check(_client_ip(request))
+    if not ok:
+        raise HTTPException(status_code=429, detail=why)
 
 
 # ---------- 工具 ----------
@@ -112,6 +132,7 @@ async def health():
         "pandoc": convert.pandoc_version(),
         "templates": convert.available_templates(),
         "limits": limiter.stats,
+        "ratelimit": rate_limiter.stats,
     }
 
 
@@ -124,11 +145,12 @@ async def templates():
           description="只检查 markdown 的标题层级是否符合规范，不生成 Word。\n\n"
                       "返回三部分：`warnings`（发现的问题）、`changes`（可以自动修复的地方）、"
                       "`guesses`（需要判断的地方系统猜了什么）。")
-async def check(file: UploadFile = File(..., description="要检查的 markdown 文件")):
+async def check(request: Request, file: UploadFile = File(..., description="要检查的 markdown 文件")):
     """只检查不转换，返回告警、会自动做的改动、以及需要判断的地方。
 
     报告与 `/convert` **同源**（都来自同一个 filter），所以两边结论一定一致。
     """
+    _check_rate(request)
     md = await _read_upload(file, config.MAX_MD_BYTES, "markdown 文件")
     check_md_size(md)
 
@@ -151,11 +173,12 @@ async def check(file: UploadFile = File(..., description="要检查的 markdown 
                       "返回修好的全文。\n\n"
                       "**请务必看 `guesses`** —— 有些地方（比如多个一级标题哪个是论文大标题）"
                       "必须做判断，那里会明确告诉系统猜了什么。")
-async def normalize_md(file: UploadFile = File(..., description="要修复的 markdown 文件")):
+async def normalize_md(request: Request, file: UploadFile = File(..., description="要修复的 markdown 文件")):
     """自动修复 markdown 并返回修好的内容。
 
     changes 是无需判断的修复；guesses 是需要判断的地方猜了什么 —— 请务必看 guesses。
     """
+    _check_rate(request)
     md = await _read_upload(file, config.MAX_MD_BYTES, "markdown 文件")
     check_md_size(md)
     text = md.decode("utf-8", errors="replace")
@@ -186,6 +209,7 @@ async def normalize_md(file: UploadFile = File(..., description="要修复的 ma
                       "通过响应头 `X-Report`（base64 JSON，含 `changes` / `guesses` / `warnings`）回报。\n\n"
                       "若不想要自动修复，传 `auto_fix=false`。")
 async def convert_md(
+    request: Request,
     file: UploadFile = File(..., description="要转换的 markdown 文件"),
     template: str | None = Form(None, description="内置模板名（见「列出可用模板」），不填用默认模板"),
     template_file: UploadFile | None = File(
@@ -193,6 +217,7 @@ async def convert_md(
     ),
 ):
     """转换成 docx。自动修复 + 告警通过 X-Report 响应头返回（base64 JSON）。"""
+    _check_rate(request)
     md = await _read_upload(file, config.MAX_MD_BYTES, "markdown 文件")
     check_md_size(md)
 
