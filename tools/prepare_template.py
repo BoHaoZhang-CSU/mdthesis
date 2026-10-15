@@ -226,6 +226,34 @@ def fix_outline_levels(styles_xml):
 
 EQUATION_STYLE_NAME = "公式"
 
+# 题注样式。规范是「**表题在表上方、图题在图下方**」，两者排版一致（黑体·五号·居中）。
+# 这份模板自带「图下面的文字」（真实论文的图题样式），所以**直接克隆**它 ——
+# 用户换成自己的模板时，表题样式会跟着他的图题样式走，不会漂移成我们自定的版式。
+CAPTION_STYLE_NAME = "表上面的文字"
+CAPTION_CLONE_FROM = "图下面的文字"
+
+
+def add_caption_style(styles_xml):
+    """加一个「表上面的文字」段落样式（照模板里的「图下面的文字」克隆）。已存在就跳过。"""
+    if re.search(r'<w:name w:val="%s"\s*/>' % re.escape(CAPTION_STYLE_NAME), styles_xml):
+        print("  表题样式已存在，跳过")
+        return styles_xml
+    m = re.search(
+        r'<w:style [^>]*w:styleId="([^"]+)"[^>]*>\s*<w:name w:val="%s"\s*/>.*?</w:style>'
+        % re.escape(CAPTION_CLONE_FROM),
+        styles_xml, re.S,
+    )
+    if not m:
+        print("  模板里没有「%s」，表题样式跳过（表题会回落到默认版式）" % CAPTION_CLONE_FROM)
+        return styles_xml
+    style = m.group(0).replace('w:styleId="%s"' % m.group(1),
+                               'w:styleId="%s"' % CAPTION_STYLE_NAME, 1)
+    style = style.replace('<w:name w:val="%s"/>' % CAPTION_CLONE_FROM,
+                          '<w:name w:val="%s"/>' % CAPTION_STYLE_NAME, 1)
+    print('  加上「%s」样式（照「%s」克隆：黑体 · 五号 · 居中）'
+          % (CAPTION_STYLE_NAME, CAPTION_CLONE_FROM))
+    return styles_xml.replace("</w:styles>", style + "</w:styles>", 1)
+
 
 def add_equation_style(styles_xml, doc_xml):
     """加一个 `公式` 样式，用来排带编号的公式。
@@ -359,6 +387,7 @@ styles = set_page_break(styles)
 styles = fix_table_style_id(styles)
 styles = fix_outline_levels(styles)
 styles = add_equation_style(styles, doc_body)
+styles = add_caption_style(styles)
 
 # --- 找出要删的 media 及其关系 ---
 rels_name = "word/_rels/document.xml.rels"

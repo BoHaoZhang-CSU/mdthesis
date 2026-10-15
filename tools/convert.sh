@@ -79,7 +79,11 @@ fi
 #    -f markdown-raw_attribute：禁用 `{=openxml}` 原始属性语法。
 #    用户能用它往 document.xml 里塞任意 OOXML，构造出"别人打开文档时才触发"的引用。
 #    关掉不影响正常 markdown（raw_html 保留 —— docx writer 本来就会丢弃它）。
-pandoc "$IN" -f markdown-raw_attribute -o "$tmpdir/raw.docx" \
+#    +tex_math_single_backslash：pandoc 默认**不开**这个扩展，于是 `\(x^2\)` 被当成
+#    转义括号解析成字面量 `(x^2)`，`\[ ... \]` 里的 `\frac{}{}` 变成 RawInline(tex) 被
+#    docx writer **静默丢弃** —— 公式塌成 `[ E_c= ]` 这种残骸，退出码 0、零告警。
+#    AI 生成的 md 普遍用 `\( \)` / `\[ \]`，必须开。
+pandoc "$IN" -f markdown-raw_attribute+tex_math_single_backslash -o "$tmpdir/raw.docx" \
   --reference-doc="$TPL" \
   --lua-filter="$FILTER" \
   "${TOC_OPTS[@]}"

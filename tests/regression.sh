@@ -109,11 +109,13 @@ print(1 if '<w:b />' in d or '<w:b/>' in d else 0)")
       [ "$has" = "1" ]; check "标题里的粗体格式被保留" "$?"
       ;;
     T3_real_hr)
+      # 水平线**一律丢弃**（不再转成段落底边框）—— 论文里不需要，用户看到的灰线就是它。
+      # 这条用例现在的作用变成"反向锁"：只要输出里出现 pBdr 就是回归 ✗
       has=$(python3 -I -c "
 import zipfile,re
 d=zipfile.ZipFile('$out').read('word/document.xml').decode()
 print(1 if '<w:pBdr>' in d else 0)")
-      [ "$has" = "1" ]; check "章节内的 --- 渲染成段落下边框" "$?"
+      [ "$has" = "0" ]; check "章节内的 --- 不画线（不留 pBdr）" "$?"
       ;;
     T9_with_image)
       has=$(python3 -I -c "
@@ -194,6 +196,57 @@ print('%s / %s / %s / x[i]=%d (k+1)=%d ab=%d a[b]=%d' % (
           T16_delimiters.md "$OUTDIR/T16_report.docx" "$TPL") >/dev/null 2>&1
       grep -q "修正了 2 处公式括号" "$rep2" 2>/dev/null
       check "报告里写明修正 2 处括号（change 行只进报告文件）" "$?"
+      ;;
+    T18_captions)
+      # 表/图题：独立成段的加粗「表N 标题」→ 按章重编号（表2-1）+ 套模板题注样式
+      # （黑体五号居中）。**不挨着表格/插图**的加粗文字不许动（对照组）。
+      got=$(python3 -I -c "
+import re, zipfile
+z=zipfile.ZipFile('$out')
+d=z.read('word/document.xml').decode(); s=z.read('word/styles.xml').decode()
+m=re.search(r'<w:style [^>]*w:styleId=\"([^\"]+)\"[^>]*>\s*<w:name w:val=\"表上面的文字\"', s)
+sid=m.group(1) if m else '无'
+nums=[]; other=0
+for p in re.findall(r'<w:p\b.*?</w:p>', d, re.S):
+    t=''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', p)).strip()
+    st=re.search(r'<w:pStyle w:val=\"([^\"]+)\"', p)
+    if st and st.group(1)==sid:
+        mm=re.match(r'^(表\d+-\d+)', t)
+        if mm: nums.append(mm.group(1))
+    if '不是题注' in t: other+=1
+print(','.join(nums)+'|'+str(other))
+")
+      [ "$got" = "表1-1,表1-2,表2-1|1" ]
+      check "表题按章重编号 + 套模板样式，且没误伤对照组（实际 $got）" "$?"
+      ;;
+    T17_backslash_math)
+      # AI 生成的 md 普遍用 \( \) / \[ \] 写公式，而 pandoc 的 markdown reader
+      # **默认不开** tex_math_single_backslash —— 于是 \(x\) 塌成字面量 (x)、
+      # \[ ... \] 里的 \frac{}{} 变成 RawInline(tex) 被 docx writer **静默丢弃**，
+      # 公式只剩 [ E_c= ] 这种残骸（退出码 0、零告警）。T15/T16 全用 $ $$，
+      # 所以这个坑一直没被覆盖 —— 这条用例就是补这个盲区。
+      got=$(python3 -I -c "
+import zipfile,re
+bs=chr(92)
+d=zipfile.ZipFile('$out').read('word/document.xml').decode()
+t=''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', d))
+# 1) 正文文字里不许残留字面量 \( \[ ，也不许残留任何 LaTeX 命令（\frac \eta ...）
+lit = sum(t.count(bs+c) for c in '([') + len(re.findall(bs + r'[a-zA-Z]+', t))
+# 2) 行内公式：\frac{a}{b} 必须活下来（有 oMath 且里面有分式 m:f）
+mt=''.join(re.findall(r'<m:t[^>]*>([^<]*)</m:t>', d))
+inline = 1 if ('ab' in mt and '<m:f>' in d) else 0
+# 3) 希腊字母没被吃掉（\eta \Delta 曾经连命令带字母一起消失）
+greek = 1 if ('η' in mt and 'Δ' in mt) else 0
+# 4) 显示式按章编号
+nums=[]
+for tb in re.findall(r'<w:tbl>.*?</w:tbl>', d, re.S):
+    if 'm:oMathPara' in tb:
+        nums.append(''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', tb))
+                    .replace(chr(0x200b),'').strip())
+print('%d|%d|%d|%s' % (lit, inline, greek, ','.join(nums)))
+")
+      [ "$got" = "0|1|1|（1-1）,（1-2）" ]
+      check "反斜杠公式变成真公式（无字面量残留 / 分式与希腊字母在 / 按章编号）（实际 $got）" "$?"
       ;;
     T12_bare_numbering)
       # 手写的裸数字编号（## 3 递推…）必须被剥掉

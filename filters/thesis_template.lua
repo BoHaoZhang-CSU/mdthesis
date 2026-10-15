@@ -374,24 +374,20 @@ local function BulletList(el)
   return nil
 end
 
--- 6. 水平线。
---    pandoc 默认生成的 VML <v:rect o:hr="t"> 漏了 fillcolor 和 stroked="f"，
---    WPS 会把它画成空心的矩形边框。这里改成用段落下边框画横线，渲染稳定。
---    紧跟在标题前面的一条直接丢弃 —— 那是章节分隔线，与「每章另起一页」重复。
-local HR_PARAGRAPH = '<w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="6" '
-  .. 'w:space="1" w:color="auto"/></w:pBdr></w:pPr></w:p>'
+-- 6. 水平线 —— **一律丢弃**（详见下面 Blocks 里的注释）。
+--    早年那段"转成段落下边框"的 HR_PARAGRAPH 常量已删：它在 Word/WPS 里画出来的
+--    就是用户抱怨的那条灰线。
 
 local function Blocks(blocks)
   local out = {}
   for i, b in ipairs(blocks) do
     if b.t == "HorizontalRule" then
-      local nxt = blocks[i + 1]
-      local is_separator = nxt and (nxt.t == "Header" or nxt.t == "Div")
-      if not is_separator then
-        out[#out + 1] = pandoc.RawBlock("openxml", HR_PARAGRAPH)
-      else
-        stats.hr_dropped = stats.hr_dropped + 1
-      end
+      -- 论文里不需要水平线：**一律丢弃**。
+      -- 早期只丢"紧挨章节标题"的那些，章节内的会被转成**段落底边框** ——
+      -- 用户在 Word/WPS 里看到的那条灰线就是它（2026-10-15 报的）。
+      -- 而 pandoc 自己生成的 <v:rect> 横线在 WPS 里会渲染成空心矩形（更早踩过）。
+      -- 所以两种做法都不留，直接全丢。
+      stats.hr_dropped = stats.hr_dropped + 1
     else
       out[#out + 1] = b
     end
@@ -635,6 +631,109 @@ local function promote_delimiters(s)
   return s, n_pairs
 end
 
+--[[
+  公式的另一种写法：\begin{equation}…\end{equation}（2026-10-15 用户报）。
+
+  pandoc 只把 $…$ / $$…$$ / \[…\] 当数学；LaTeX 环境原样变成 **RawInline(tex)**，
+  而 docx writer 遇到 raw tex **直接丢掉** —— 公式凭空消失、零警告（最坏的失败方式）。
+  这里把 equation / equation* / displaymath 转成显示式数学；其余环境（align、gather、
+  split、cases…）和认不出的 LaTeX 一律**保留成可见文字 + 报警** —— 宁可难看地露出来，
+  也不要静默消失。
+]]
+local MATH_ENVS = { ["equation"] = true, ["equation*"] = true, ["displaymath"] = true }
+
+local function rescue_latex(doc)
+  local converted, left = 0, {}
+  doc = doc:walk({
+    RawInline = function(el)
+      if el.format ~= "tex" then return nil end
+      local env, body = el.text:match("^%s*\\begin%s*{([%w*]+)}%s*(.-)%s*\\end%s*{%1}%s*$")
+      if env and MATH_ENVS[env] then
+        body = body:gsub("\\label%s*{[^}]*}", "")      -- 标签没法解析，去掉
+        body = body:gsub("^%s+", ""):gsub("%s+$", "")
+        if body ~= "" then
+          converted = converted + 1
+          return pandoc.Math("DisplayMath", body)
+        end
+      end
+      left[#left + 1] = el.text:gsub("%s+", " ")
+      return pandoc.Str(el.text:gsub("%s+", " "))       -- 认不出的：留在正文里
+    end,
+  })
+  return doc, converted, left
+end
+
+-- ── 表/图题（2026-10-15 用户报）─────────────────────────────────────────────
+-- AI 生成的 md 常把题注写成**独立一行的加粗文字**：`**表10 与既有研究结果对比**`。
+-- 学位论文的规范是「**表题在表上方、图题在图下方**」（这份 md 里表题本来就在上方 ✓），
+-- 排版照模板（黑体·五号·居中）。这里做三件事：剥掉手写的号、按章重编号（表2-1）、
+-- 套上模板的题注样式（`prepare_template` 会照「图下面的文字」克隆出「表上面的文字」）。
+--
+-- 只在**紧挨着**表格/插图时才认 —— 否则正文里一句加粗的「图3 说明…」会被误伤。
+local STYLE_CAPTION = { ["表"] = "表上面的文字", ["图"] = "图下面的文字" }
+
+local function caption_of(p)
+  -- 认「整段只有一个加粗块，且以 表N / 图N 开头」
+  --
+  -- ⚠️ 中文**不能写进 Lua 的字符类** `[表图]` —— Lua 模式是按字节匹配的，
+  -- 「表」是 3 个字节，字符类会去匹配单个字节，整个模式就废了（踩过）。
+  -- 所以这里一律用字面量比较 + 分步 gsub。
+  local c = p.content
+  if #c ~= 1 or c[1].t ~= "Strong" then return nil end
+  local txt = pandoc.utils.stringify(c[1].content)
+  local kind = nil
+  if txt:match("^%s*表") then kind = "表"
+  elseif txt:match("^%s*图") then kind = "图" end
+  if not kind then return nil end
+  local rest = txt:gsub("^%s*" .. kind, "", 1)
+  rest = rest:gsub("^%s*[%d%.%-]+", "", 1)      -- 手写的号：10 / 2.1 / 2-1
+  rest = rest:gsub("^%s*：", "", 1)
+  rest = rest:gsub("^%s*:", "", 1)
+  rest = rest:gsub("^%s+", ""):gsub("%s+$", "")
+  if rest == "" then return nil end
+  return kind, rest
+end
+
+local cap_chapter, cap_n = 0, { ["表"] = 0, ["图"] = 0 }
+
+local function number_captions(blocks)
+  local out = {}
+  for i, b in ipairs(blocks) do
+    if b.t == "Header" and b.level == 2 then
+      cap_chapter = cap_chapter + 1
+      cap_n = { ["表"] = 0, ["图"] = 0 }
+      out[#out + 1] = b
+    elseif b.t == "Para" then
+      local kind, rest = caption_of(b)
+      local adjacent = false
+      if kind == "表" then
+        local nxt = blocks[i + 1]
+        adjacent = nxt ~= nil and nxt.t == "Table"
+      elseif kind == "图" then
+        local prv = blocks[i - 1]
+        if prv then prv:walk({ Image = function() adjacent = true end }) end
+      end
+      if kind and adjacent then
+        cap_n[kind] = cap_n[kind] + 1
+        local num = (cap_chapter > 0)
+          and string.format("%s%d-%d", kind, cap_chapter, cap_n[kind])
+          or string.format("%s%d", kind, cap_n[kind])
+        stats.captions = stats.captions + 1
+        -- custom-style 只能靠「Div 包 Plain」生效（直接给 Para 加属性会串到下一段，踩过）
+        out[#out + 1] = pandoc.Div(
+          { pandoc.Plain({ pandoc.Str(num .. " " .. rest) }) },
+          pandoc.Attr("", {}, { ["custom-style"] = STYLE_CAPTION[kind] })
+        )
+      else
+        out[#out + 1] = b
+      end
+    else
+      out[#out + 1] = b
+    end
+  end
+  return out
+end
+
 -- 入口：先做各种扫描与安全校验，再转换，最后汇报做了什么
 function Pandoc(doc)
   -- 1. 资源引用安全校验 —— 必须在 writer 抓取资源之前跑
@@ -653,6 +752,11 @@ function Pandoc(doc)
     end,
   })
   stats.chapters, stats.sections = 0, 0
+
+  -- 1.6 公式的 LaTeX 环境写法（\begin{equation}…）→ 显示式数学。
+  --     必须在公式编号**之前**做，这样救回来的公式也能拿到编号。
+  local latex_left
+  doc, stats.latex_rescued, latex_left = rescue_latex(doc)
 
   if #blocked_resources > 0 then
     warn(string.format(
@@ -695,6 +799,10 @@ function Pandoc(doc)
   eq_chapter, eq_count, stats.equations = 0, 0, 0
   doc.blocks = number_equations(doc.blocks)
 
+  -- 4.6 表/图题：剥手写号 + 按章重编号 + 套模板的题注样式（同理，也要在改写成 Div 之前）
+  cap_chapter, stats.captions = 0, 0
+  doc.blocks = number_captions(doc.blocks)
+
   -- 5. 转换
   local out = doc:walk({
     Header = Header,
@@ -715,7 +823,13 @@ function Pandoc(doc)
   if stats.equations > 0 then
     note("change", string.format(
       "给 %d 个公式加了编号（按章，形如「（3-1）」）。"
-        .. "不想编号的公式，用 ::: {.unnumbered} … ::: 包起来。", stats.equations))
+        .. "不想编号的公式，用 ::: {.unnumbered} … ::: 包起来；"
+        .. "正文里手写的「式（2）」这类引用不会跟着变，请核对。", stats.equations))
+  end
+  if stats.captions > 0 then
+    note("change", string.format(
+      "给 %d 个表/图题加了编号（按章，形如「表2-1」），并套上模板的题注样式（黑体·五号·居中）。"
+        .. "正文里手写的「由表10可知」这类引用不会跟着变，请核对。", stats.captions))
   end
   if stats.toc_dropped > 0 then
     note("change", "删掉了 markdown 里手写的目录（已自动生成 Word 目录域，格式与模板一致）")
@@ -725,11 +839,22 @@ function Pandoc(doc)
       stats.stripped))
   end
   if stats.hr_dropped > 0 then
-    note("change", string.format("删掉了 %d 条紧挨章节标题的水平线 ---（每章已自动另起一页，不需要分隔线）",
-      stats.hr_dropped))
+    note("change", string.format(
+      "删掉了 %d 条水平线 ---（每章已自动另起一页，论文里不需要分隔线；"
+        .. "pandoc 生成的那种在 WPS 里还会渲染成空心矩形）", stats.hr_dropped))
   end
   if stats.h1_demoted > 0 then
     note("change", string.format("把 %d 个多余的一级标题降级成了二级标题 ##", stats.h1_demoted))
+  end
+  if stats.latex_rescued and stats.latex_rescued > 0 then
+    note("change", string.format(
+      "把 %d 处 \\begin{equation} 写法的公式转成了正常公式（pandoc 原本会把它们整段丢掉）",
+      stats.latex_rescued))
+  end
+  if latex_left and #latex_left > 0 then
+    warn(string.format(
+      "有 %d 处 LaTeX 内容没能转换，已原样保留在正文里（请改成 $…$ 或 $$…$$ 写法）：\n%s",
+      #latex_left, list_items(latex_left)))
   end
   if stats.delims > 0 then
     note("change", string.format(
