@@ -27,9 +27,36 @@ TPL="${3:-${THESIS_TEMPLATE:-$ROOT/assets/templates/毕业论文通用模板.doc
 FILTER="$ROOT/filters/thesis_template.lua"
 STRIP="$HERE/strip_unused_media.py"
 
-for f in "$IN" "$TPL" "$FILTER" "$STRIP"; do
-  [ -f "$f" ] || { echo "找不到文件: $f" >&2; exit 1; }
+[ -f "$IN" ] || { echo "找不到输入文件：$IN" >&2; exit 1; }
+for f in "$FILTER" "$STRIP"; do
+  [ -f "$f" ] || { echo "项目文件缺失：$f（仓库不完整？）" >&2; exit 1; }
 done
+
+# 模板缺失是最常见的新手卡点 —— 给一段能照做的指引，而不是一句「找不到文件」
+if [ ! -f "$TPL" ]; then
+  cat >&2 <<EOF
+── 找不到 Word 模板 ──────────────────────────────────────
+  $TPL
+
+本仓库不附带模板，需要你自备一份（模板是需要自己准备的资产）。
+三步：
+
+  1. 把你的 .docx 放进 assets/templates/
+  2. 加工一次：
+       python3 tools/prepare_template.py 你的模板.docx assets/templates/你的模板.docx
+  3. 重新运行本命令
+
+如果 assets/templates/ 里已经有 .docx，说明是名字没对上 ——
+用第三个参数指定，或用环境变量 THESIS_TEMPLATE：
+
+  $0 输入.md 输出.docx assets/templates/你的模板.docx
+  THESIS_TEMPLATE=xxx.docx $0 输入.md 输出.docx
+
+详见 assets/templates/README.md
+──────────────────────────────────────────────────────────
+EOF
+  exit 2
+fi
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT

@@ -187,6 +187,16 @@ print(' '.join(f'{nm.get(k,k)}:{v}' for k,v in c.most_common()))
 [ "$got" != "$expect" ] && { echo "      期望: $expect"; echo "      实际: $got"; }
 fi
 
+# ── 没有模板时的提示（全新 clone 的用户最容易卡在这一步）──
+echo "── 模板缺失时的提示"
+msg=$("$PROJ/tools/convert.sh" "$HERE/论文1.md" /tmp/.never.docx /nonexistent/tpl.docx 2>&1 || true)
+has()   { case "$msg" in *"$1"*) return 0;; *) return 1;; esac; }
+lack()  { case "$msg" in *"$1"*) return 1;; *) return 0;; esac; }
+has  "找不到 Word 模板"        && check "说清了是模板的问题" 0 || check "说清了是模板的问题" 1
+has  "prepare_template.py"    && check "给了具体怎么做" 0    || check "给了具体怎么做" 1
+has  "assets/templates/README" && check "指向了文档" 0        || check "指向了文档" 1
+lack "毕业论文通用模板.docx"    && check "没暴露对用户无意义的文件名" 0 || check "没暴露对用户无意义的文件名" 1
+
 echo
 printf '结果: %d 通过, %d 失败\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

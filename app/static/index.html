@@ -87,7 +87,8 @@
   .link:hover { text-decoration:underline; }
 
   /* 状态区：成功只给一行，细节默认收起。失败才摊开。 */
-  #status { margin-top:16px; font-size:12.5px; line-height:1.8; color:var(--muted); }
+  #status { margin-top:16px; font-size:12.5px; line-height:1.8; color:var(--muted);
+            white-space:pre-wrap; }
   #status:empty { display:none; }
   #status .line { padding:2px 0; }
   #status .line.ok  { color:var(--ok); }
@@ -336,7 +337,12 @@ async function convertOne(item) {
   const r = await fetch('convert', { method: 'POST', body: fd });
   if (!r.ok) {
     let msg = 'HTTP ' + r.status;
-    try { const j = await r.json(); msg = j.error || msg; } catch (_) {}
+    try {
+      const j = await r.json();
+      msg = j.error || msg;
+      // detail 里往往才是能照做的指引（比如「没有模板该怎么办」），别吞掉
+      if (j.detail) msg += '\n\n' + j.detail;
+    } catch (_) {}
     throw new Error(msg);
   }
 
