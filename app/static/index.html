@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Markdown 转毕业论文 Word</title>
+<title>Markdown转毕业论文docx</title>
 <style>
   :root {
     --bg:#ffffff; --ink:#1a1a1a; --muted:#6e6e73;
@@ -21,10 +21,9 @@
   }
   .wrap { max-width:660px; margin:0 auto; }
 
-  /* 标题只作标识，不跟内容抢视线 */
   h1 {
-    font-size:16px; font-weight:600; letter-spacing:1px;
-    margin:0 0 24px; padding-bottom:12px; border-bottom:2px solid var(--ink);
+    font-size:22px; font-weight:600; letter-spacing:.5px; text-align:center;
+    margin:0 0 28px; padding-bottom:16px; border-bottom:2px solid var(--ink);
   }
 
   .card { padding:0; }
@@ -44,7 +43,27 @@
   #drop.compact .small { display:none; }
   #drop.compact:hover { color:var(--accent); }
 
-  #list { margin-top:0; border:1px solid var(--line); border-top:none; }
+  /* 粘贴入口默认收起 —— 不占默认视图，需要的人点开 */
+  #pasteBox { margin-top:14px; text-align:center; }
+  /* 次要入口：用灰色，别和主按钮抢视线（悬停时才变红） */
+  #pasteToggle { font-size:12.5px; color:var(--muted); }
+  #pasteToggle:hover { color:var(--accent); }
+  #pastePanel { margin-top:12px; text-align:left; }
+  #pasteText {
+    width:100%; height:220px; resize:vertical; padding:10px 12px;
+    font:12.5px/1.7 ui-monospace,Menlo,Consolas,monospace;
+    color:var(--ink); background:#fff; border:1px solid var(--line);
+  }
+  #pasteText:focus { outline:none; border-color:var(--accent); }
+  .paste-foot { display:flex; align-items:center; gap:12px; margin-top:10px; flex-wrap:wrap; }
+  #pasteAdd {
+    padding:9px 18px; font:inherit; font-size:14px; color:#fff;
+    background:var(--accent); border:1px solid var(--accent); cursor:pointer;
+  }
+  #pasteAdd:hover { background:var(--accent-h); border-color:var(--accent-h); }
+  .paste-foot .hint { font-size:12px; color:var(--muted); flex:1; min-width:180px; }
+
+  #list { margin-top:14px; border:1px solid var(--line); }
   #list:empty { display:none; border:none; }
   .item {
     display:flex; align-items:center; gap:12px;
@@ -111,7 +130,7 @@
 <body>
 <div class="wrap">
 
-  <h1>Markdown 转毕业论文 Word</h1>
+  <h1>Markdown转毕业论文docx</h1>
 
   <div class="card">
 
@@ -120,6 +139,17 @@
       <div class="small">也可以点击选择文件</div>
     </div>
     <input type="file" id="mdFile" accept=".md,.markdown,.txt" multiple hidden>
+
+    <div id="pasteBox">
+      <a class="link" id="pasteToggle">▾ 或者直接粘贴 markdown 文本</a>
+      <div id="pastePanel" hidden>
+        <textarea id="pasteText" placeholder="把 markdown 粘在这里…"></textarea>
+        <div class="paste-foot">
+          <button id="pasteAdd" type="button">加入转换队列</button>
+          <span class="hint">粘贴的内容不含图片。需要图片的话，请把 .md 和图片一起打包上传。</span>
+        </div>
+      </div>
+    </div>
 
     <div id="list"></div>
 
@@ -236,6 +266,45 @@ window.addEventListener('drop', e => {
   drop.classList.remove('over');
   addFiles(null, e.dataTransfer);
 });
+
+/* ---------- 粘贴文本 ----------
+   做法是**合成一个 File 对象，走现有队列** —— 后面的转换、勾选、下载、
+   错误提示全都复用，不新增任何转换逻辑。
+   文件名从正文第一个 `#` 标题取（粘贴的论文第一行通常就是标题），
+   取不到就退回「粘贴的内容」。 */
+$('pasteToggle').onclick = () => {
+  const panel = $('pastePanel');
+  panel.hidden = !panel.hidden;
+  $('pasteToggle').textContent = (panel.hidden ? '▾ ' : '▴ ') + '或者直接粘贴 markdown 文本';
+  if (!panel.hidden) $('pasteText').focus();
+};
+
+// 从正文里找第一个一级标题当文件名。去掉 markdown 记号和不适合做文件名的字符。
+function titleFromMd(text) {
+  const m = text.match(/^\s*#\s+(.+?)\s*$/m);
+  if (!m) return '';
+  let n = m[1].replace(/[*_`#\[\]]/g, '').replace(/[\\/:*?"<>|]/g, '').trim();
+  return n.length > 40 ? n.slice(0, 40) : n;
+}
+
+$('pasteAdd').onclick = () => {
+  const text = $('pasteText').value;
+  if (!text.trim()) {
+    say('<div class="line err">文本框是空的，先粘贴一点内容。</div>');
+    return;
+  }
+  if (text.length > 5 * 1024 * 1024) {
+    say('<div class="line err">内容超过 5 MB，请改成分文件上传。</div>');
+    return;
+  }
+  const base = titleFromMd(text) || '粘贴的内容';
+  addFiles([new File([text], base + '.md', { type: 'text/markdown' })]);
+
+  // 加进队列后收起面板并清空 —— 默认视图恢复干净，要看结果看队列就行
+  $('pasteText').value = '';
+  $('pastePanel').hidden = true;
+  $('pasteToggle').textContent = '▾ 或者直接粘贴 markdown 文本';
+};
 
 /* ---------- 相对时间 ---------- */
 function ago(ts) {

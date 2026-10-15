@@ -58,6 +58,11 @@ assert \"classList.contains('tog')\" in h, '详情没有展开/收起开关'
 assert 'function uniqueName' in h, '没处理同名文件（会互相覆盖）'
 # 用户明确要求：全站直角，不要圆角
 assert not re.search(r'border-radius:\s*[1-9]', h), '还有圆角'
+# 粘贴文本：默认折叠的入口 + 合成 File 走现有队列 + 从 # 标题取名
+assert 'id=\"pasteToggle\"' in h and 'id=\"pastePanel\" hidden' in h, '粘贴入口不是默认折叠的'
+assert 'new File([text]' in h and 'addFiles([new File' in h, '粘贴没走现有的文件队列'
+assert 'function titleFromMd' in h, '没从 # 标题取名'
+assert '粘贴的内容不含图片' in h, '没提示粘贴不含图片'
 " >/dev/null 2>&1
 check "页面结构完整（拖拽 / 队列 / 勾选 / 时间 / 模板位置 / 自动下载）" "$?"
 
