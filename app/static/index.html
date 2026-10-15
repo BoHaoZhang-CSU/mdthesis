@@ -125,7 +125,7 @@
     <button id="go" disabled>转换并下载 Word</button>
 
     <div class="foot">
-      <span id="tplName">模板加载中…</span>
+      <span id="tplName"></span>
       <span>
         <input type="file" id="tplFile" accept=".docx">
         <a class="link" id="tplPick">用自己的模板</a>
@@ -252,7 +252,7 @@ setInterval(render, 30000);
 fetch('templates').then(r => r.json()).then(d => {
   defaultTpl = (d.templates || [])[0] || '';
   renderTpl();
-}).catch(() => { $('tplName').textContent = '模板读取失败'; });
+}).catch(() => { $('tplName').textContent = '模板：读取失败'; });
 
 function renderTpl() {
   if (tplFile) {
