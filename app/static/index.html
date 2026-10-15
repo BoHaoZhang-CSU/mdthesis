@@ -415,7 +415,7 @@ async function convertOne(item) {
     throw new Error(msg);
   }
 
-  let rep = { warnings: [], changes: [], guesses: [] };
+  let rep = { warnings: [], changes: [], guesses: [], stats: [] };
   const raw = r.headers.get('X-Report');
   if (raw) {
     try {
@@ -438,11 +438,13 @@ function resultHTML(res) {
   const nChange = (res.rep.changes || []).length;
   const nGuess  = (res.rep.guesses || []).length;
   const nWarn   = (res.rep.warnings || []).length;
+  const nStat   = (res.rep.stats || []).length;
 
   let h = '<div class="line ok"><span class="fname">' + esc(res.name) + '</span>' +
           '（' + (res.size/1024).toFixed(0) + ' KB）';
   if (nGuess) h += ' <span class="flag">⚠ ' + nGuess + ' 处需确认</span>';
   const bits = [];
+  if (nStat)   bits.push('识别结果');
   if (nChange) bits.push(nChange + ' 处自动修正');
   if (nWarn)   bits.push(nWarn + ' 条提示');
   if (nGuess)  bits.push(nGuess + ' 处需确认');
@@ -451,6 +453,7 @@ function resultHTML(res) {
 
   if (bits.length) {
     let d = '';
+    if (nStat)   d += '<b>识别结果：</b>' + statRows(res.rep.stats);
     if (nGuess)  d += '<b>需要你确认：</b>' + details(res.rep.guesses);
     if (nWarn)   d += '<b>提示：</b>' + details(res.rep.warnings);
     if (nChange) d += '<b>已自动修正：</b>' + details(res.rep.changes);
@@ -459,6 +462,13 @@ function resultHTML(res) {
          '">手动下载</a></div></div>';
   }
   return h;
+}
+
+/* 「识别结果」—— 他这篇里读到了什么（大标题/章节/公式/表格/图片/目录）。
+   识别错了（大标题挑错、章节数不对）在这里当场就能看出来。 */
+function statRows(stats) {
+  return '<ul>' + stats.map(s =>
+    '<li>' + esc(s.label) + '：' + esc(s.message) + '</li>').join('') + '</ul>';
 }
 
 /* ---------- 转换选中的 ---------- */

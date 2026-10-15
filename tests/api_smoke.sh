@@ -37,6 +37,7 @@ assert 'id=\"drop\"' in h, '缺拖拽区'
 assert 'id=\"go\"' in h, '缺转换按钮'
 assert 'id=\"tplFile\"' in h, '缺自定义模板上传'
 assert 'X-Report' in h, '前端没读自动修复报告'
+assert '识别结果' in h, '前端没有展示「识别结果」（读到了什么）'
 # 转换完成后要自动触发下载，不该让用户再点一次
 assert 'a.click()' in h, '没有自动下载逻辑'
 assert 'id=\"dlBtn\"' not in h, '还留着多余的下载按钮'
@@ -126,6 +127,17 @@ assert 'w:numId w:val=\"1\"' in s or 'numId w:val=\"1\"' in s, '自动编号定�
 print('OK')
 " >/dev/null 2>&1
 check "产物样式正确（摘要上标题 / 分页 / 无空心横线 / 编号）" "$?"
+
+# 「识别结果」——用户要能一眼看出我们从他文档里读到了什么
+has=$(py "
+import base64,json,re
+raw=open('$TMP/hdr.txt',encoding='utf-8',errors='replace').read()
+m=re.search(r'(?im)^x-report:\s*(\S+)', raw)
+d=json.loads(base64.b64decode(m.group(1))) if m else {}
+labels={s.get('label') for s in d.get('stats',[])}
+print(1 if {'大标题','章节','目录'} <= labels else 0)
+")
+[ "$has" -eq 1 ]; check "识别结果里有大标题/章节/目录（实际 $has）" "$?"
 
 # ── /convert 的核心承诺：不合规的 md 也直接出可用文档（自动修复，不返工给用户）──
 echo "── POST /convert （T1 不合规文档，应自动修复后成功）"
@@ -233,7 +245,9 @@ tp = re.search(r'<w:tblPr>.*?</w:tblPr>', tbl, re.S).group(0)
 assert '<w:tblBorders>' in tp, '表格没有直接格式的上下边框（WPS 下会丢线）'
 assert re.search(r'<w:top w:val=\"single\"', tp), '表格缺直接格式顶线'
 assert re.search(r'<w:bottom w:val=\"single\"', tp), '表格缺直接格式底线'
-assert re.search(r'<w:insideV w:val=\"none\"', tp), '表格未显式关闭竖线'
+# 必须是 nil 不是 none —— Word 看到直接格式写 none 会认为「这层没规定」，
+# 回落模板 Table 样式的三线表粗线，公式表上下就出现黑线（用户实测报过）
+assert re.search(r'<w:insideV w:val=\"nil\"', tp), '表格未显式关闭竖线（要用 nil，none 会被 Word 回落）'
 rows = re.findall(r'<w:tr\b.*?</w:tr>', tbl, re.S)
 hdr = [r for r in rows if '<w:tblHeader' in r]
 assert hdr, '没有表头行'

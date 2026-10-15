@@ -55,7 +55,7 @@ def _header_border(styles_xml):
 
 
 def _none(side):
-    return f'<w:{side} w:val="none" w:sz="0" w:space="0" w:color="auto"/>'
+    return f'<w:{side} w:val="nil" w:sz="0" w:space="0" w:color="auto"/>'
 
 
 def _tbl_borders(top, bottom):
@@ -108,7 +108,7 @@ def _set_cell_bottom(cell_xml, header_border):
 
 def _all_none():
     return ("<w:tblBorders>"
-            + "".join('<w:%s w:val="none" w:sz="0" w:space="0" w:color="auto"/>' % s
+            + "".join('<w:%s w:val="nil" w:sz="0" w:space="0" w:color="auto"/>' % s
                       for s in ("top", "left", "bottom", "right", "insideH", "insideV"))
             + "</w:tblBorders>")
 

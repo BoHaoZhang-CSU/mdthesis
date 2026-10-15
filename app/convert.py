@@ -42,6 +42,10 @@ class ConvertResult:
     # 所以修复在服务内部完成，这里只回报做了什么、猜了什么。
     changes: list[str] = field(default_factory=list)
     guesses: list[str] = field(default_factory=list)
+    # 「识别结果」：从他这篇里读到了什么（大标题 / 章节 / 公式 / 表格 / 图片 / 目录）。
+    # 每项 {"label": ..., "message": ...}，网页上按「标签 → 值」两栏显示，
+    # 识别错了（比如大标题挑错）用户当场就能看出来。
+    stats: list[dict] = field(default_factory=list)
 
 
 # ---------- 工作目录 ----------
@@ -126,17 +130,19 @@ def _resource_warnings(log: str) -> list[str]:
             f"（tools/convert.sh，它会把图片一起读到）。"]
 
 
-def _read_report(path: Path) -> tuple[list[str], list[str], list[str]]:
-    """读 filter 写的结果文件（JSONL），返回 (warnings, changes, guesses)。
+def _read_report(path: Path) -> tuple[list[str], list[str], list[str], list[dict]]:
+    """读 filter 写的结果文件（JSONL），返回 (warnings, changes, guesses, stats)。
 
-    格式：每行一个 {"kind": "...", "message": "..."}，kind ∈ warning/change/guess。
+    格式：每行一个 {"kind": "...", "message": "..."}，
+    kind ∈ warning/change/guess/stat（stat 行额外带 "label"）。
     容忍解析失败的行走（当作 warning），免得格式小改动就把整次转换搞挂。
     """
     if not path.exists():
-        return [], [], []
+        return [], [], [], []
     warnings: list[str] = []
     changes: list[str] = []
     guesses: list[str] = []
+    stats: list[dict] = []
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         line = line.strip()
         if not line:
@@ -148,8 +154,11 @@ def _read_report(path: Path) -> tuple[list[str], list[str], list[str]]:
             kind, msg = "warning", line
         if not msg:
             continue
-        {"change": changes, "guess": guesses}.get(kind, warnings).append(msg)
-    return warnings, changes, guesses
+        if kind == "stat":
+            stats.append({"label": rec.get("label", ""), "message": msg})
+        else:
+            {"change": changes, "guess": guesses}.get(kind, warnings).append(msg)
+    return warnings, changes, guesses, stats
 
 
 # ---------- 对外接口 ----------
@@ -175,7 +184,7 @@ def run_check(md_bytes: bytes, timeout: int | None = None):
         )
         if rc != 0:
             raise ConvertError("markdown 解析失败", status=422, detail=log.strip()[-2000:])
-        return _read_report(warnings_file)
+        return _read_report(warnings_file)[:3]   # /check 只回三份清单，统计归 /convert
 
 
 def run_convert(
@@ -228,13 +237,14 @@ def run_convert(
         if not out_path.exists():
             raise ConvertError("转换没有产出文件", status=500, detail=log.strip()[-2000:])
 
-        warnings, changes, guesses = _read_report(warnings_file)
+        warnings, changes, guesses, stats = _read_report(warnings_file)
         warnings += _resource_warnings(log)      # pandoc 那部分警告单独捞
         return ConvertResult(
             docx=out_path.read_bytes(),
             warnings=warnings,
             changes=changes,
             guesses=guesses,
+            stats=stats,
         )
 
 

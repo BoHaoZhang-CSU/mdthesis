@@ -9,11 +9,16 @@ r"""给 pandoc 生成的目录域填上「缓存结果」。
   真实 Word 文档那里存着上次更新的目录条目；Word/WPS 打开时会刷新，
   但**不是所有程序都会刷新域**（实测 LibreOffice 直接渲染就是空的）。
 
-  所以这里把章节条目标题填进去。页码留空，等用户打开文档时由 Word/WPS
-  更新域补上 —— 即使不更新，至少能看到目录结构，而不是一片空白。
+  所以这里把章节条目标题填进去。**编号也填**（第1章 / 1.1）：模板的编号是样式的
+  自动编号，不在标题文字里，光填标题就成了「引言」而不是原论文里的「第1章 绪论」——
+  原论文（assets/sources/）的目录缓存里，编号就是当文字存着的。
+  页码留空，等用户打开文档时由 Word/WPS 更新域补上 —— 即使不更新，至少能看到
+  目录结构（含章号），而不是一片空白或没头没尾的标题。
 
 用法: python3 build_toc.py <模板.docx> <输入.docx> <输出.docx>
 """
+import json
+import os
 import re
 import sys
 import zipfile
@@ -55,8 +60,88 @@ def page_text_width(templates_zip):
     return w - int(left.group(1) if left else 1701) - int(right.group(1) if right else 1134)
 
 
-def collect_entries(doc_xml, ids):
-    """按文档顺序收集需要进目录的标题，返回 [(样式名, 标题文字), ...]。"""
+def heading_numbering(tpl_zip, ids):
+    """从模板读出各级标题的**自动编号**定义（形如 `第%1章` / `%1.%2`）。
+
+    返回 {样式名: (numId, ilvl, lvlText, start)}。
+
+    只认十进制（numFmt="decimal"）：中文数字（一、二、）、带圈编号那类算不准，
+    遇到就整条跳过 —— 目录里写出一个错的章号，比不写章号糟得多。
+    模板压根没给标题配自动编号（比如用户自带模板）时也返回空，行为与以前一致。
+    """
+    try:
+        styles = tpl_zip.read("word/styles.xml").decode("utf-8")
+        numbering = tpl_zip.read("word/numbering.xml").decode("utf-8")
+    except KeyError:
+        return {}
+
+    out = {}
+    for name in (n for n, _ in LEVELS):
+        sid = ids.get(name)
+        if not sid:
+            continue
+        st = re.search(
+            r'<w:style [^>]*w:styleId="%s"[^>]*>(.*?)</w:style>' % re.escape(sid),
+            styles, re.S,
+        )
+        if not st:
+            continue
+        npr = re.search(r"<w:numPr>(.*?)</w:numPr>", st.group(1), re.S)
+        if not npr:
+            continue
+        num_id = re.search(r'<w:numId w:val="(\d+)"', npr.group(1))
+        ilvl = re.search(r'<w:ilvl w:val="(\d+)"', npr.group(1))
+        if not num_id or not ilvl:
+            continue
+        # numId → abstractNumId → 该 ilvl 的 <w:lvl>
+        a = re.search(
+            r'<w:num w:numId="%s"[^>]*>\s*<w:abstractNumId w:val="(\d+)"' % num_id.group(1),
+            numbering,
+        )
+        if not a:
+            continue
+        ab = re.search(
+            r'<w:abstractNum w:abstractNumId="%s"[^>]*>(.*?)</w:abstractNum>' % a.group(1),
+            numbering, re.S,
+        )
+        if not ab:
+            continue
+        lv = re.search(
+            r'<w:lvl w:ilvl="%s"[^>]*>(.*?)</w:lvl>' % ilvl.group(1), ab.group(1), re.S
+        )
+        if not lv:
+            continue
+        body = lv.group(1)
+        fmt = re.search(r'<w:numFmt w:val="([^"]+)"', body)
+        txt = re.search(r'<w:lvlText w:val="([^"]*)"', body)
+        start = re.search(r'<w:start w:val="(\d+)"', body)
+        if not txt or (fmt and fmt.group(1) != "decimal"):
+            continue
+        out[name] = (num_id.group(1), int(ilvl.group(1)), txt.group(1),
+                     int(start.group(1)) if start else 1)
+    return out
+
+
+def collect_entries(doc_xml, ids, numbering=None):
+    """按文档顺序收集需要进目录的标题，返回 [(目录样式, 编号, 标题文字), ...]。
+
+    编号按模板的自动编号定义递增（第1章 → 第2章；换章后 1.1 重新从 1 数）。
+    """
+    numbering = numbering or {}
+    counters = {}
+
+    def number_of(name):
+        spec = numbering.get(name)
+        if not spec:
+            return ""
+        _num_id, ilvl, lvl_text, start = spec
+        counters[ilvl] = counters.get(ilvl, start - 1) + 1
+        for deeper in [k for k in counters if k > ilvl]:   # 换章后小节重新数
+            del counters[deeper]
+        return re.sub(r"%(\d)",
+                      lambda m: str(counters.get(int(m.group(1)) - 1, start)),
+                      lvl_text)
+
     entries = []
     for m in re.finditer(r"<w:p\b.*?</w:p>", doc_xml, re.S):
         p = m.group(0)
@@ -67,28 +152,32 @@ def collect_entries(doc_xml, ids):
             if ids.get(heading_name) == st.group(1):
                 txt = _para_text(p)
                 if txt:
-                    entries.append((toc_name, txt))
+                    entries.append((toc_name, number_of(heading_name), txt))
                 break
     return entries
 
 
 def build_toc_xml(entries, ids, tab_pos, page_placeholder=""):
-    """生成目录条目段落：标题 …… 页码。
+    """生成目录条目段落：编号 + 标题 …… 页码。
 
-    两处细节是照着原论文（assets/sources/）里的真实目录抄的：
+    三处细节是照着原论文（assets/sources/）里的真实目录抄的：
       1. 段落要有**右对齐点线制表位** —— 这才是「......」引导线的来源
          <w:tabs><w:tab w:val="right" w:leader="dot" w:pos="..."/></w:tabs>
       2. 条目格式：标题 <Tab> 页码。页码留空，等 Word/WPS 更新域时补上。
+      3. 章号与标题是**两个 run**，原论文里就是这样（`第1章 ` + `绪论`）。
     """
     out = []
-    for toc_name, text in entries:
+    for toc_name, num, text in entries:
         sid = ids.get(toc_name)
         style = f'<w:pStyle w:val="{sid}"/>' if sid else ""
         tabs = (f'<w:tabs><w:tab w:val="right" w:leader="dot" w:pos="{tab_pos}"/>'
                 "</w:tabs>")
+        runs = ('<w:r><w:t xml:space="preserve">' + _esc(num + " ") + "</w:t></w:r>"
+                if num else "")
         out.append(
             "<w:p><w:pPr>" + style + tabs + "</w:pPr>"
-            '<w:r><w:t xml:space="preserve">' + _esc(text) + "</w:t></w:r>"
+            + runs
+            + '<w:r><w:t xml:space="preserve">' + _esc(text) + "</w:t></w:r>"
             '<w:r><w:tab/><w:t xml:space="preserve">' + page_placeholder + "</w:t></w:r>"
             "</w:p>"
         )
@@ -201,6 +290,24 @@ def enable_update_fields(settings_xml):
     )
 
 
+def note_stat(label, msg):
+    """往 filter 那份结果文件里追加一条统计（网页上的「识别结果」）。
+
+    和 filter 共用一条通道 —— 用户看到的是一份完整清单，不用拼两处。
+    """
+    path = os.environ.get("THESIS_WARNINGS_FILE")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            # 紧凑格式，和 filter（Lua 那边）写的行保持一致 —— 同一个文件两种格式
+            # 会让人以为解析错了（实际就踩过：断言里 grep 不到）
+            fh.write(json.dumps({"kind": "stat", "label": label, "message": msg},
+                                ensure_ascii=False, separators=(",", ":")) + "\n")
+    except OSError:
+        pass
+
+
 def main():
     tpl_path, src, dst = sys.argv[1], sys.argv[2], sys.argv[3]
 
@@ -217,7 +324,8 @@ def main():
                 zout.writestr(item, zin.read(item.filename))
         return
 
-    entries = collect_entries(doc, ids)
+    tpl_zip = zipfile.ZipFile(tpl_path)
+    entries = collect_entries(doc, ids, heading_numbering(tpl_zip, ids))
     if not entries:
         with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
@@ -225,7 +333,7 @@ def main():
         print("  没有可收录的章节标题，目录留空待 Word 生成")
         return
 
-    tab_pos = page_text_width(zipfile.ZipFile(tpl_path))
+    tab_pos = page_text_width(tpl_zip)
     toc_xml = build_toc_xml(entries, ids, tab_pos)
 
     # 把 pandoc 的目录域**重建成 Word 的标准结构**。
@@ -289,10 +397,16 @@ def main():
             zout.writestr(item, data)
 
     bits = [f"{len(entries)} 条条目"]
+    if any(num for _, num, _ in entries):
+        bits.append("已写入章号（第N章 / N.M）")
     if stats.get("title_style"):
         bits.append("标题用模板的「目录两个字」样式")
     bits.append("已打开「打开时更新域」——页码由 Word/WPS 打开时写入")
     print("  目录：" + "，".join(bits))
+    # 页码只有用户的 Word/WPS 算得出来（我们没有排版引擎）——
+    # 提示就落在「目录」这一行上，不更新域的人也知道去哪儿看页码
+    note_stat("目录", "%d 条；页码要在 Word/WPS 里右键「更新域」（或按 F9）后才会出现"
+              % len(entries))
 
 
 if __name__ == "__main__":

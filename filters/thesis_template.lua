@@ -301,6 +301,13 @@ local seen_h1 = false
 local function Header(el)
   local txt = pandoc.utils.stringify(el.content)
 
+  -- 统计章节数（给「识别结果」用）。摘要不是编号章节，不算进去。
+  if el.level == 2 and not txt:match("^%s*摘要%s*$") then
+    stats.chapters = stats.chapters + 1
+  elseif el.level == 3 then
+    stats.sections = stats.sections + 1
+  end
+
   -- 遇到任何标题都重算一次：只有参考资料标题会让它为 true
   in_refs = (txt:match("^%s*参考资料%s*$") or txt:match("^%s*参考文献%s*$")) ~= nil
 
@@ -484,7 +491,8 @@ local function json_escape(s)
   return s
 end
 
-local function emit(kind, msg, to_stderr)
+-- label 只有统计行（kind="stat"）用：网页上按「标签 → 值」两栏列出
+local function emit(kind, msg, to_stderr, label)
   msg = msg:gsub("%s+$", "")
   if to_stderr then
     pandoc.log.warn(msg)
@@ -492,7 +500,8 @@ local function emit(kind, msg, to_stderr)
   if warnings_file then
     local fh = io.open(warnings_file, "a")
     if fh then
-      fh:write(string.format('{"kind":"%s","message":"%s"}\n', kind, json_escape(msg)))
+      local lbl = label and string.format('"label":"%s",', json_escape(label)) or ""
+      fh:write(string.format('{"kind":"%s",%s"message":"%s"}\n', kind, lbl, json_escape(msg)))
       fh:close()
     end
   end
@@ -506,6 +515,11 @@ end
 -- 我自动改掉的东西 / 我的判断：只进结果文件，不打扰命令行
 local function note(kind, msg)
   emit(kind, msg, false)
+end
+
+-- 「这篇文档里识别到了什么」—— 用户一眼就能看出有没有识别错（大标题挑错、章节数不对……）
+local function stat(label, msg)
+  emit("stat", msg, false, label)
 end
 
 -- 告警里最多列举几项，避免告警长度随用户输入无界增长
@@ -530,6 +544,19 @@ function Pandoc(doc)
   -- 1. 资源引用安全校验 —— 必须在 writer 抓取资源之前跑
   blocked_resources = {}
   doc = check_resources(doc)
+
+  -- 1.5 数一数文档里有什么（网页上的「识别结果」）。位置有讲究：
+  --     在安全校验**之后**（被拦掉的图片不该算进来）、
+  --     在公式编号**之前**（编号会把公式改写成表格，混进表格数里）。
+  local counts = { tables = 0, images = 0, equations = 0 }
+  doc:walk({
+    Table = function() counts.tables = counts.tables + 1 end,
+    Image = function() counts.images = counts.images + 1 end,
+    Math = function(m)
+      if m.mathtype == "DisplayMath" then counts.equations = counts.equations + 1 end
+    end,
+  })
+  stats.chapters, stats.sections = 0, 0
 
   if #blocked_resources > 0 then
     warn(string.format(
@@ -599,6 +626,28 @@ function Pandoc(doc)
   end
   if stats.h1_demoted > 0 then
     note("change", string.format("把 %d 个多余的一级标题降级成了二级标题 ##", stats.h1_demoted))
+  end
+
+  -- 7. 识别结果：让用户一眼看出「我们从他文档里读到了什么」，识别错了当场就能发现
+  if #titles > 0 then
+    stat("大标题", titles[1])
+  else
+    stat("大标题", "没找到一级标题（#）—— 如果这篇有标题，请用 # 标出来")
+  end
+  if stats.chapters > 0 or stats.sections > 0 then
+    stat("章节", string.format("%d 章 · %d 节", stats.chapters, stats.sections))
+  end
+  if counts.equations > 0 then
+    local tail = (counts.equations == stats.equations)
+        and "按章自动编号"
+        or string.format("其中 %d 个按章编号", stats.equations)
+    stat("公式", string.format("%d 个（%s）", counts.equations, tail))
+  end
+  if counts.tables > 0 then
+    stat("表格", string.format("%d 个（转成三线表）", counts.tables))
+  end
+  if counts.images > 0 then
+    stat("图片", string.format("%d 张", counts.images))
   end
 
   return out

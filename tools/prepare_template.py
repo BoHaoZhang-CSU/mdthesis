@@ -57,6 +57,8 @@ REQUIRED_STYLES = [
 
 # filter 把论文大标题放在这个样式里（见 filters/thesis_template.lua）
 TITLE_STYLE_NAME = "摘要上标题"
+# 「目录」两个字用的样式（build_toc 会把 pandoc 的 TOC Heading 换成它）
+TOC_TITLE_STYLE_NAME = "目录两个字"
 
 
 def _parse_styles(styles_xml):
@@ -180,6 +182,9 @@ def fix_outline_levels(styles_xml):
     原模板的大纲级别是「围绕 hand 1 是最大标题」设计的，但本项目的约定是
     论文大标题用自定义样式（摘要上标题）、章节用 heading 2/3。所以：
       - 大标题样式去掉大纲级别 —— 否则它会作为条目出现在目录里（不该出现）
+      - 「目录」两个字同样要去掉 —— TOC 域指令里的 `\\u` 是「按段落大纲级别收录」，
+        它自己带着级别就会被当成一条目录收进去（**F9 更新域后才暴露**：
+        目录第一行变成「目录    2」。2026-10-15 用户实测报的）
       - heading 2 -> 0（章，目录一级）
       - heading 3 -> 1（节，目录二级）
 
@@ -211,6 +216,7 @@ def fix_outline_levels(styles_xml):
         return styles_xml.replace(style, new, 1)
 
     styles_xml = set_level(TITLE_STYLE_NAME, 0, remove=True)
+    styles_xml = set_level(TOC_TITLE_STYLE_NAME, 0, remove=True)
     for name, lvl in OUTLINE_LEVELS.items():
         styles_xml = set_level(name, lvl)
 

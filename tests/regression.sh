@@ -65,14 +65,13 @@ for md in "$HERE"/cases/*.md; do
   out="$OUTDIR/${name}.docx"
   warn="$OUTDIR/${name}.stderr"
 
-  # 注意：从 md 所在目录跑，这样相对路径的图片能解析
-  (cd "$HERE/cases" && pandoc "$(basename "$md")" -o "$raw" \
-      --reference-doc="$TPL" --lua-filter="$PROJ/filters/thesis_template.lua") 2>"$warn"
+  # ⚠️ 必须走 convert.sh（真实管线），不能手工拼 pandoc ——
+  # 之前就是手工拼的，结果 set_table_borders / build_toc 这两步后处理
+  # **从来没被测到过**，表格边框和目录条目的问题只能靠人肉发现（踩过）。
+  # 从 md 所在目录跑，这样相对路径的图片能解析。
+  (cd "$HERE/cases" && "$PROJ/tools/convert.sh" "$(basename "$md")" "$out" "$TPL") 2>"$warn"
   rc=$?
-  check "pandoc 退出码 0" "$rc"
-
-  python3 -I "$PROJ/tools/strip_unused_media.py" "$raw" "$out" >/dev/null 2>&1
-  check "瘦身脚本执行成功" "$?"
+  check "转换管线退出码 0" "$rc"
 
   # 通用断言：不能出现 pandoc 那个会渲染成空心矩形的 VML 横线
   n=$(python3 -I -c "
@@ -134,7 +133,17 @@ for t in re.findall(r'<w:tbl>.*?</w:tbl>', d, re.S):
     if chr(0x200b) in t or 'm:oMathPara' in t:
         txt=''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', t)).replace(chr(0x200b),'').strip()
         nums.append(txt)
-borderless = all('<w:tblBorders>' not in t for t in re.findall(r'<w:tbl>.*?</w:tbl>', d, re.S) if 'm:oMathPara' in t)
+
+# 公式表格必须**显式声明**六条边为 nil —— 用 none 的话 Word 会回落到
+# 模板 Table 样式的三线表边框，公式上下就出现黑线（实测踩过）。
+# 注意：整段处在 bash 双引号里，Python 字符串里的双引号必须写成 \"
+def _clean(t):
+    b=re.search(r'<w:tblBorders>(.*?)</w:tblBorders>', t, re.S)
+    if not b: return False
+    sides=re.findall(r'<w:(?:top|bottom|left|right|insideH|insideV)\b[^>]*/>', b.group(1))
+    return len(sides)==6 and all('w:val=\"nil\"' in s for s in sides)
+ft=[t for t in re.findall(r'<w:tbl>.*?</w:tbl>', d, re.S) if 'm:oMathPara' in t]
+borderless = bool(ft) and all(_clean(t) for t in ft)
 print(','.join(nums) + '|' + ('1' if borderless else '0'))
 ")
       [ "$got" = "（1-1）,（1-2）,（2-1）|1" ]
@@ -178,6 +187,20 @@ except Exception: print(0)")
   esac
 done
 
+# ── 「识别结果」统计行（网页上那一栏的数据源）──
+# 用户要能一眼看出「我们从他文档里读到了什么」，识别错了当场发现。
+echo "── 识别结果统计行"
+rep="$OUTDIR/report.jsonl"
+rm -f "$rep"
+(cd "$HERE/cases" && THESIS_WARNINGS_FILE="$rep" "$PROJ/tools/convert.sh" \
+    T15_equations.md "$OUTDIR/T15_stats.docx" "$TPL") >/dev/null 2>&1
+for want in 大标题 章节 公式 目录; do
+  grep -q "\"label\":\"$want\"" "$rep" 2>/dev/null
+  check "统计里有「$want」" "$?"
+done
+grep -q "F9" "$rep" 2>/dev/null
+check "目录统计里带了 F9 提示（页码得用户更新域才有）" "$?"
+
 # 主文档基线：样式分布必须与已确认的版本一致。
 # 只有用本项目的默认模板时才有意义 —— 演示模板的版式不同，跳过。
 if [ "${TPL_IS_DEMO:-0}" = "1" ]; then
@@ -185,11 +208,12 @@ if [ "${TPL_IS_DEMO:-0}" = "1" ]; then
 else
 echo "── 主用例 tests/论文1.md（基线断言）"
 out="$OUTDIR/论文1.docx"
-(cd "$HERE" && pandoc 论文1.md -o "$OUTDIR/论文1_raw.docx" \
-    --reference-doc="$TPL" --lua-filter="$PROJ/filters/thesis_template.lua") 2>/dev/null
-python3 -I "$PROJ/tools/strip_unused_media.py" "$OUTDIR/论文1_raw.docx" "$out" >/dev/null 2>&1
+# 和上面的用例一样必须走 convert.sh —— 基线锁的是**整条管线**的产出。
+# 实测：换管线后只多了 build_toc 填的目录条目（toc 2:18 + toc 1:7 + 目录标题:1，
+# 正好等于 heading 3 / heading 2 的数量），其余 8 个样式一字未变。
+(cd "$HERE" && "$PROJ/tools/convert.sh" 论文1.md "$out" "$TPL") 2>/dev/null
 
-expect='Compact:51 Body Text:26 First Paragraph:22 heading 3:18 heading 2:7 摘要上标题:1 摘要:1 Block Text:1'
+expect='Compact:51 Body Text:26 First Paragraph:22 toc 2:18 heading 3:18 toc 1:7 heading 2:7 摘要上标题:1 摘要:1 目录两个字:1 Block Text:1'
 got=$(python3 -I -c "
 import zipfile,re
 from collections import Counter
@@ -202,6 +226,50 @@ print(' '.join(f'{nm.get(k,k)}:{v}' for k,v in c.most_common()))
 ")
 [ "$got" = "$expect" ]; check "样式分布与基线一致" "$?"
 [ "$got" != "$expect" ] && { echo "      期望: $expect"; echo "      实际: $got"; }
+
+# 目录缓存里必须**带章号**。模板的编号是样式的自动编号（lvlText=第%1章 / %1.%2），
+# 不在标题文字里 —— 不写进缓存的话，目录就成了没头没尾的「引言」（用户报过）。
+toc=$(python3 -I -c "
+import zipfile,re
+z=zipfile.ZipFile('$out')
+d=z.read('word/document.xml').decode(); s=z.read('word/styles.xml').decode()
+ids={}
+for m in re.finditer(r'<w:style [^>]*w:styleId=\"([^\"]+)\"[^>]*>\s*<w:name w:val=\"([^\"]*)\"\s*/>', s):
+    ids.setdefault(m.group(2), m.group(1))
+toc_ids={ids.get('toc 1'), ids.get('toc 2')}
+n=ok=0
+for m in re.finditer(r'<w:p\b.*?</w:p>', d, re.S):
+    p=m.group(0)
+    st=re.search(r'<w:pStyle w:val=\"([^\"]+)\"', p)
+    if not st or st.group(1) not in toc_ids: continue
+    t=''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', p)).strip()
+    if not t: continue
+    n+=1
+    if re.match(r'^(第\d+章|\d+\.\d+) \S', t): ok+=1
+print('%d/%d' % (ok, n))
+")
+[ "$toc" = "25/25" ]; check "目录缓存全部带章号（实际 $toc）" "$?"
+
+# 只有章节标题能进目录：其他样式一律不得带大纲级别 0-2。
+# TOC 域指令里有 \u（按段落大纲级别收录），谁带了级别谁就会被 Word 收进目录 ——
+# 「目录    2」自己变成一条目录就是这么来的（用户 F9 后实测报的）。
+# ⚠️ 这类 bug 平时看不见：我们写的缓存不含它们，**只有更新域才暴露**，所以必须锁在这里。
+stray=$(python3 -I -c "
+import zipfile,re
+z=zipfile.ZipFile('$out')
+d=z.read('word/document.xml').decode(); s=z.read('word/styles.xml').decode()
+lvl={}
+for m in re.finditer(r'<w:style [^>]*w:styleId=\"([^\"]+)\"[^>]*>(.*?)</w:style>', s, re.S):
+    nm=re.search(r'<w:name w:val=\"([^\"]*)\"', m.group(2))
+    ol=re.search(r'<w:outlineLvl w:val=\"(\d+)\"', m.group(2))
+    if nm and ol: lvl[m.group(1)]=(nm.group(1), int(ol.group(1)))
+bad=set()
+for sid in set(re.findall(r'<w:pStyle w:val=\"([^\"]+)\"', d)):
+    nm, l = lvl.get(sid, ('', 99))
+    if l <= 2 and nm and not nm.startswith('heading'): bad.add(nm)
+print(','.join(sorted(bad)) or '无')
+")
+[ "$stray" = "无" ]; check "没有非章节样式会混进目录（实际 $stray）" "$?"
 fi
 
 # ── 没有模板时的提示（全新 clone 的用户最容易卡在这一步）──

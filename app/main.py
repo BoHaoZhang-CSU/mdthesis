@@ -103,12 +103,14 @@ def _result_headers(result: convert.ConvertResult) -> dict:
         "X-Warnings-Count": str(len(result.warnings)),
         "X-Changes-Count": str(len(result.changes)),
         "X-Guesses-Count": str(len(result.guesses)),
+        "X-Stats-Count": str(len(result.stats)),
     }
-    if result.warnings or result.changes or result.guesses:
+    if result.warnings or result.changes or result.guesses or result.stats:
         blob = _b64({
             "warnings": result.warnings,
             "changes": result.changes,
             "guesses": result.guesses,
+            "stats": result.stats,
         })
         if len(blob) <= MAX_WARNING_HEADER:
             headers["X-Report"] = blob
