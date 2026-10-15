@@ -231,33 +231,59 @@ docker compose exec -T pandoc-web ./tests/regression.sh # ③ 容器内：55 项
 
 ### 迁移到另一台机器
 
-**目标机是 Debian 11，docker.io 是 20.10 那一代**，所以：
+**流程已在真实机器上验证过**（arm64 开发板 / Debian 12 / Docker 20.10.24 /
+docker-compose 1.29.2，92 MB 走局域网 6.6 秒传完，载入 → 启动 → 转换 → 73+41 项测试全绿）。
 
-- 构建时**关掉了 provenance/SBOM attestation**（compose 里 `provenance: false`），
-  否则老 Docker 不认新格式的 manifest。已验证 `docker save` 产物根目录有
-  `manifest.json`（经典格式），20.10 能 load。
-- 磁盘只剩约 4.3 GB，够用（镜像 484 MB + tar 95 MB），但**导入完记得删掉 tar**。
+**先体检目标机**，这三项不对后面全是白费：
 
 ```bash
-# 源机（本机）
-sg docker -c "docker save pandoc-web:0.1.0" | gzip > pandoc-web-0.1.0.tar.gz   # 约 91 MB
-scp -r pandoc-web-0.1.0.tar.gz deploy/ radxa@<a7s-ip>:~/
-
-# 目标机
-gunzip -c pandoc-web-0.1.0.tar.gz | docker load
-docker-compose -f deploy/docker-compose.yml up -d
-rm pandoc-web-0.1.0.tar.gz
-docker-compose -f deploy/docker-compose.yml exec -T pandoc-web ./tests/regression.sh
+uname -m                    # 必须是 aarch64
+docker --version            # 20.10 以上
+docker compose version      # v2 插件
+docker-compose --version    # v1 独立版（两者只会有其一）
+df -h /                     # 至少留 1 GB
 ```
 
-**为什么目标机用 `deploy/docker-compose.yml` 而不是根目录那份**：
-Debian 11 的 `docker-compose` 是 1.25（v1），根目录那份含 `build.provenance`/`sbom`
-（新版 compose spec 才有的 key），v1 会报「Unsupported config option」。
-`deploy/` 那份是**纯运行版**（没有 build 段）+ `version: "2.4"`，兼容 v1。
-（新版 compose 会提示 `version` 已废弃 —— 正常，别删。）
+> ⚠️ **镜像只能在 arm64 上跑**。x86_64 的机器载入后会报 `exec format error`，
+> 得在目标机原生 `docker compose build`。
 
-**目标机还需要**：Docker（Debian 11 用 `sudo apt install docker.io docker-compose`，
-注意命令是带连字符的 `docker-compose` 而非 `docker compose` 插件）、当前用户加入 `docker` 组。
+```bash
+# 源机
+docker save pandoc-web:0.1.0 | gzip > mdthesis-image.tar.gz          # 约 91 MB
+scp -r mdthesis-image.tar.gz deploy/ 对方@主机:~/
+
+# 目标机
+gunzip -c mdthesis-image.tar.gz | docker load
+
+docker compose -f deploy/docker-compose.yml up -d          # v2 插件
+# 或 docker-compose -f deploy/docker-compose.yml up -d     # v1 独立版
+
+curl -s http://127.0.0.1:8000/health                        # 应返回 status: ok
+docker compose exec -T pandoc-web ./tests/regression.sh     # 73 项，全绿即环境正常
+rm mdthesis-image.tar.gz
+```
+
+#### 两个实测踩过的坑
+
+**① compose 有 v1 / v2 两套，命令不同**
+
+`docker compose`（v2 插件，带空格）和 `docker-compose`（v1 独立版，带连字符）**不是一回事**。
+Debian 12 默认装的是 **v1**，敲 v2 的命令会报 `'compose' is not a docker command`。
+
+**务必用 `deploy/docker-compose.yml`**：根目录那份含 `build.provenance` / `sbom`
+（新版 compose spec 才有的 key），**v1 会直接报「Unsupported config option」**。
+`deploy/` 那份是纯运行版（无 build 段）+ `version: "2.4"`，两代都认。
+
+> 新版 compose 会提示 `version` 已废弃 —— 正常，**别删**，v1 靠它判断格式。
+
+**② 老 Docker 不认新镜像格式**
+
+构建时关掉了 provenance/SBOM attestation（compose 里 `provenance: false`），
+否则 **Docker 20.10 这类老版本 load 不了**。已验证 `docker save` 产物根目录有
+`manifest.json`（经典格式），20.10 能正常载入。
+
+**目标机还需要**：Docker 已安装并运行，当前用户加入 `docker` 组（`sudo usermod -aG docker $USER`，
+然后重新登录）。
 
 ### 基座选型：为什么是 Debian 12
 
