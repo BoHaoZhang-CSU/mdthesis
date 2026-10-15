@@ -39,6 +39,9 @@ assert 'id=\"tplFile\"' in h, '缺自定义模板上传'
 # 右上角仓库入口 + 「继续添加 md 文件」提示（用户要求）
 assert 'github.com/BoHaoZhang-CSU/mdthesis' in h, '右上角缺仓库链接'
 assert '继续添加 md 文件' in h, '缺「继续添加 md 文件」提示（要提示是 md）'
+# 页码提示：WPS 不会打开就更新域，必须让用户看到「按 F9」
+assert '页码按 F9 更新' in h, '缺「页码按 F9 更新」提示（WPS 不自动更新域）'
+assert '更新域' in h, '页码提示里没写清楚怎么做'
 # 添加区必须在文件列表**下面** —— 加过文件后视觉重心是列表本身（用户要求）
 assert h.find('id=\"list\"') < h.find('id=\"drop\"'), '添加区跑到文件列表上面去了'
 assert 'X-Report' in h, '前端没读自动修复报告'
