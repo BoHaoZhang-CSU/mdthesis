@@ -42,6 +42,7 @@ assert '继续添加 md 文件' in h, '缺「继续添加 md 文件」提示（�
 # 页码提示：WPS 不会打开就更新域，必须让用户看到「按 F9」
 assert '页码按 F9 更新' in h, '缺「页码按 F9 更新」提示（WPS 不自动更新域）'
 assert '更新域' in h, '页码提示里没写清楚怎么做'
+assert '更新整个目录' in h, '页码提示漏了 Word 会弹对话框这一步'
 # 添加区必须在文件列表**下面** —— 加过文件后视觉重心是列表本身（用户要求）
 assert h.find('id=\"list\"') < h.find('id=\"drop\"'), '添加区跑到文件列表上面去了'
 assert 'X-Report' in h, '前端没读自动修复报告'
@@ -208,14 +209,18 @@ toc_para = re.search(r'<w:p><w:pPr><w:pStyle w:val=\"%s\"[^>]*>(.*?)</w:pPr>' % 
 assert toc_para and 'pageBreakBefore' in toc_para.group(1), '目录没有独立成页'
 # 标题是中文，不是 pandoc 默认的 Table of Contents
 assert 'Table of Contents' not in d, '目录标题还是英文'
-# 缓存条目要填上（不刷新域的程序会显示成空白）
-entries = re.findall(r'<w:p><w:pPr><w:pStyle w:val=\"[^\"]+\"/><w:tabs><w:tab w:val=\"right\" w:leader=\"dot\"', d)
-assert len(entries) >= 2, f'目录缓存条目太少（{len(entries)}）'
+# 域缓存里放的是**提示**（不是条目）：按 F9 后 Word/WPS 会把这段整体换成真目录。
+# 条目占位已废 —— 没人按 F9 时它看起来像目录、但页码全空，容易被直接交上去。
+seg = re.search(r'<w:fldChar w:fldCharType=' + Q + r'separate' + Q + r'\s*/></w:r></w:p>(.*?)'
+                r'<w:p><w:r><w:fldChar w:fldCharType=' + Q + r'end' + Q, d, re.S)
+cache = seg.group(1) if seg else ''
+assert 'F9' in cache, '目录缓存里没有 F9 提示'
+assert '<w:pStyle' not in cache, '目录缓存里还有条目（现在应该只放提示）'
 # 两条结构性要求 —— 实测不满足时渲染器会整块丢弃目录
 assert '<w:sdt>' not in d, '还套着 SDT 外壳（渲染器会忽略里面的内容）'
 assert re.search(r'</w:r><w:r><w:instrText', d), 'fldChar 没各自独立成 run'
 print('OK')" >/dev/null 2>&1
-check "目录域 + 中文标题 + 缓存条目 + Word 标准结构" "$?"
+check "目录域 + 中文标题 + F9 提示占位 + Word 标准结构" "$?"
 
 # ── 表格必须是三线表（曾经因为样式引用悬空，一条线都没有）──
 echo "── POST /convert （表格 → 三线表）"

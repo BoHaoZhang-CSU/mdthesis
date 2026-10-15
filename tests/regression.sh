@@ -259,7 +259,9 @@ out="$OUTDIR/论文1.docx"
 # 正好等于 heading 3 / heading 2 的数量），其余 8 个样式一字未变。
 (cd "$HERE" && "$PROJ/tools/convert.sh" 论文1.md "$out" "$TPL") 2>/dev/null
 
-expect='Compact:51 Body Text:26 First Paragraph:22 toc 2:18 heading 3:18 toc 1:7 heading 2:7 摘要上标题:1 摘要:1 目录两个字:1 Block Text:1'
+# 目录条目不再由我们写进缓存（改成 F9 提示占位），所以这份基线里**没有 toc 1 / toc 2** ——
+# 那两种样式是 Word/WPS 更新域时才生成的。其余每一项都必须和以前逐字相同。
+expect='Compact:51 Body Text:26 First Paragraph:22 heading 3:18 heading 2:7 摘要上标题:1 摘要:1 目录两个字:1 Block Text:1'
 got=$(python3 -I -c "
 import zipfile,re
 from collections import Counter
@@ -273,28 +275,29 @@ print(' '.join(f'{nm.get(k,k)}:{v}' for k,v in c.most_common()))
 [ "$got" = "$expect" ]; check "样式分布与基线一致" "$?"
 [ "$got" != "$expect" ] && { echo "      期望: $expect"; echo "      实际: $got"; }
 
-# 目录缓存里必须**带章号**。模板的编号是样式的自动编号（lvlText=第%1章 / %1.%2），
-# 不在标题文字里 —— 不写进缓存的话，目录就成了没头没尾的「引言」（用户报过）。
+# 目录域缓存里放的是**提示**（不是条目）：按 F9 后会被整体换成真正的目录。
+# 为什么不用"条目占位"：没人按 F9 时它看起来像目录、但页码全空 —— 容易被直接交上去 ✗；
+# 提示占位是一行醒目的字，不会有人看不见 ✓（详见 build_toc.py 里的注释）。
 toc=$(python3 -I -c "
-import zipfile,re
-z=zipfile.ZipFile('$out')
-d=z.read('word/document.xml').decode(); s=z.read('word/styles.xml').decode()
-ids={}
-for m in re.finditer(r'<w:style [^>]*w:styleId=\"([^\"]+)\"[^>]*>\s*<w:name w:val=\"([^\"]*)\"\s*/>', s):
-    ids.setdefault(m.group(2), m.group(1))
-toc_ids={ids.get('toc 1'), ids.get('toc 2')}
-n=ok=0
-for m in re.finditer(r'<w:p\b.*?</w:p>', d, re.S):
-    p=m.group(0)
-    st=re.search(r'<w:pStyle w:val=\"([^\"]+)\"', p)
-    if not st or st.group(1) not in toc_ids: continue
-    t=''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', p)).strip()
-    if not t: continue
-    n+=1
-    if re.match(r'^(第\d+章|\d+\.\d+) \S', t): ok+=1
-print('%d/%d' % (ok, n))
+import re, zipfile
+d=zipfile.ZipFile('$out').read('word/document.xml').decode()
+m=re.search(r'<w:fldChar w:fldCharType=\"separate\"\s*/></w:r></w:p>(.*?)<w:p><w:r><w:fldChar w:fldCharType=\"end\"', d, re.S)
+seg=m.group(1) if m else ''
+styled=len(re.findall(r'<w:pStyle', seg))    # 占位提示段没有 pStyle；有条目就会有
+ok=(styled==0) and ('F9' in seg)
+print('OK' if ok else '坏 styled=%d F9=%s' % (styled, 'F9' in seg))
 ")
-[ "$toc" = "25/25" ]; check "目录缓存全部带章号（实际 $toc）" "$?"
+[ "$toc" = "OK" ]; check "目录缓存是 F9 提示、没有条目（实际 $toc）" "$?"
+
+# 页边批注方案已撤（正文里写提示就够，批注是否显示还取决于 WPS 设置）。
+# 这里留着防回归：**不许**再往 docx 里塞同名重复部件（pandoc 本来就有 comments.xml，
+# 写重了 zip 里会出现两个同名条目，读取器挑哪个不一定）。
+dup=$(python3 -I -c "
+import zipfile
+n=zipfile.ZipFile('$out').namelist()
+print(','.join(sorted(x for x in set(n) if n.count(x)>1)) or '无')
+")
+[ "$dup" = "无" ]; check "docx 里没有同名重复部件（实际 $dup）" "$?"
 
 # 只有章节标题能进目录：其他样式一律不得带大纲级别 0-2。
 # TOC 域指令里有 \u（按段落大纲级别收录），谁带了级别谁就会被 Word 收进目录 ——

@@ -473,8 +473,10 @@ function resultHTML(res) {
   if (bits.length) {
     let d = '';
     if (hasToc)  d += '<b>目录页码：</b>' + details([
-                   '打开文档后，在目录上右键「更新域」（或按 F9）才会出现 —— ' +
-                   '文档里已经存好了目录条目，只是页码要由 Word/WPS 排版时算出来。']);
+                   '没看到页码时：点一下目录 → 按 F9（若弹出对话框，选「更新整个目录」）；' +
+                   '也可以右键目录 →「更新域」。',
+                   '页码要 WPS/Word 排版时才算得出来，转换时算不出 —— 不是文件坏了。' +
+                   '（文档里目录那一段也写着同样的提示。）']);
     if (nStat)   d += '<b>识别结果：</b>' + statRows(res.rep.stats);
     if (nGuess)  d += '<b>需要你确认：</b>' + details(res.rep.guesses);
     if (nWarn)   d += '<b>提示：</b>' + details(res.rep.warnings);

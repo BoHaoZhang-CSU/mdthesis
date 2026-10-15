@@ -308,6 +308,23 @@ def note_stat(label, msg):
         pass
 
 
+# 目录域缓存里放的**提示**（不是条目）：用户按 F9 后，Word/WPS 会把这段整体换成
+# 真正的目录。为什么不用"条目占位"（写完条目、只留页码空着）：
+#   条目占位在没人按 F9 时是一份"看起来像目录、但页码全空"的东西 —— 不留神就交上去了 ✗；
+#   提示占位在没人按 F9 时是**一行醒目的提示**，不会有人看不见 ✓。
+#   代价：没人按 F9 时正文里没有目录（条目占位至少有目录结构）。
+# （先前还试过在「目录」上挂页边批注，已撤 —— 正文里写就够了，批注是否显示还取决于设置。）
+TOC_PLACEHOLDER = "（在这段文字上点一下，按 F9 → 目录和页码就生成好了）"
+
+
+def build_toc_placeholder():
+    """占位提示段：居中 + 灰字（一眼能看出是"还没生成"的东西）。"""
+    grey = '<w:rPr><w:color w:val="808080"/></w:rPr>'
+    return ('<w:p><w:pPr><w:jc w:val="center"/>' + grey + "</w:pPr>"
+            '<w:r>' + grey + '<w:t xml:space="preserve">' + TOC_PLACEHOLDER
+            + "</w:t></w:r></w:p>")
+
+
 def main():
     tpl_path, src, dst = sys.argv[1], sys.argv[2], sys.argv[3]
 
@@ -333,8 +350,11 @@ def main():
         print("  没有可收录的章节标题，目录留空待 Word 生成")
         return
 
-    tab_pos = page_text_width(tpl_zip)
-    toc_xml = build_toc_xml(entries, ids, tab_pos)
+    tab_pos = page_text_width(tpl_zip)      # 只有改回"条目占位"时才用得到
+    # 域缓存里放**提示**（不是条目）—— 按 F9 后会被整体换成真正的目录。
+    # 想改回"缓存里放条目"：把这行换成 build_toc_xml(entries, ids, tab_pos) 即可
+    # （那是今天早些时候的做法，函数和章号逻辑都还留着）。
+    toc_xml = build_toc_placeholder()
 
     # 把 pandoc 的目录域**重建成 Word 的标准结构**。
     #
@@ -406,7 +426,7 @@ def main():
     # 页码只有用户的 Word/WPS 算得出来（我们没有排版引擎）——
     # 但「按 F9 更新域」这句提示由**网页**放在成功行上（WPS 不会打开就更新），
     # 报告里只报条数，避免同一句提示出现两遍
-    note_stat("目录", "%d 条" % len(entries))
+    note_stat("目录", "%d 条（按 F9 生成）" % len(entries))
 
 
 if __name__ == "__main__":
