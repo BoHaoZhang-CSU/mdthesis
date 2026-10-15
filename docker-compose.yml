@@ -34,8 +34,8 @@ services:
       - "127.0.0.1:8000:8000"
 
     # --- 资源闸门 ---
-    mem_limit: 1g
-    memswap_limit: 1g     # 与 mem_limit 相等 = 容器内禁用 swap。
+    mem_limit: 1.5g
+    memswap_limit: 1.5g     # 与 mem_limit 相等 = 容器内禁用 swap。
                           # 这台机器 swap 已在重度使用，容器一旦可换页会拖垮全机；
                           # 宁可让容器 OOM 被杀（有 restart 兜底）。
     pids_limit: 64        # 防 fork 炸弹。主机 ulimit -u 是 30719，本身没有保护。
@@ -65,7 +65,7 @@ services:
     environment:
       WORK_ROOT: /work
       HOME: /work
-      MAX_CONCURRENT: "1"
+      MAX_CONCURRENT: "3"
       MAX_QUEUE: "8"
       CONVERT_TIMEOUT: "120"
       # 禁掉出网（纵深防御）。filter 已经拦了外部图片/链接，

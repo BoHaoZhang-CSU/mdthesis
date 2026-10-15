@@ -22,13 +22,16 @@ services:
     image: pandoc-web:0.1.0
     container_name: pandoc-web
 
+    # 端口可用环境变量覆盖：在 docker-compose.yml 同目录建一个 .env，写
+    #   PORT=43792
+    # 就会绑到宿主机的 43792（容器内始终是 8000）。不设则默认 8000。
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${PORT:-8000}:8000"
 
-    # 资源闸门。pandoc 单次转换峰值约 140MB；目标机 5.8GB 内存、
-    # 但已经在跑别的东西，给它 1GB 上限兜底。
-    mem_limit: 1g
-    memswap_limit: 1g     # 与 mem_limit 相等 = 容器内禁用 swap
+    # 资源闸门。pandoc 单次转换吃 60~150 MB（随文档大小线性增长），
+    # 空闲时常驻仅 32 MB。1.5 GB 上限对真实论文有约 10 倍余量。
+    mem_limit: 1.5g
+    memswap_limit: 1.5g     # 与 mem_limit 相等 = 容器内禁用 swap
     pids_limit: 64        # 防 fork 炸弹
     # 不要写 cpus —— 若宿主 system.slice 未启用 cpu 控制器会导致容器起不来。
 
@@ -48,7 +51,9 @@ services:
     environment:
       WORK_ROOT: /work
       HOME: /work
-      MAX_CONCURRENT: "1"
+      # 并发 3：pandoc 是单线程的，并发才能用上多核；
+      # 真实论文单次约 75 MB，3 个并行也远低于 1.5 GB 上限。
+      MAX_CONCURRENT: "3"
       MAX_QUEUE: "8"
       CONVERT_TIMEOUT: "120"
       BLOCK_NETWORK: "1"
