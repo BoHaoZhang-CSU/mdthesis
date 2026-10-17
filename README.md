@@ -141,7 +141,7 @@ pandoc-web/
     ├── 论文1.md / .docx      主用例与产出
     ├── 论文1_预览.pdf        渲染预览（LibreOffice 转的，仅供参考）
     ├── cases/               25 个刁钻边界用例
-    └── regression.sh        回归测试，118 项断言
+    └── regression.sh        回归测试，144 项断言
 ```
 
 ---
