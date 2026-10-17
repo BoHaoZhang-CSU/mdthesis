@@ -11,19 +11,21 @@
      管道缓冲，然后子进程阻塞、请求挂到超时，看起来像"pandoc 卡死"。
   3. TMPDIR 指向请求目录（磁盘）—— 本机 /tmp 是 3.6GB tmpfs，在里面建临时文件等于吃内存。
 """
+import io
 import json
 import os
 import shutil
 import signal
 import subprocess
 import tempfile
+import zipfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import re
 
-from . import config
+from . import archive, config, validate
 
 
 class ConvertError(Exception):
@@ -37,6 +39,9 @@ class ConvertError(Exception):
 @dataclass
 class ConvertResult:
     docx: bytes
+    # 下载时建议的文件名（zip 单个 md 时要用内层 md 的名字，不是包名）
+    output_name: str = "output.docx"
+    is_zip: bool = False
     warnings: list[str] = field(default_factory=list)
     # 转换前自动修的格式问题。用户不该被要求"自己改好再回来"，
     # 所以修复在服务内部完成，这里只回报做了什么、猜了什么。
@@ -126,8 +131,8 @@ def _resource_warnings(log: str) -> list[str]:
         return []
     shown = "、".join(names[:3]) + ("…" if len(names) > 3 else "")
     return [f"{len(names)} 处图片没能读到，已替换成文字（{shown}）。"
-            f"接口只收单个 .md 文件，图片传不上来 —— 含图片的文档请用命令行版转换"
-            f"（tools/convert.sh，它会把图片一起读到）。"]
+            f"请确认图片已随文档上传（zip 里，或与 md 一起选择），"
+            f"且文件名与 md 里的引用一致 —— 文件夹名不同没关系，会按文件名找。"]
 
 
 def _read_report(path: Path) -> tuple[list[str], list[str], list[str], list[dict]]:
@@ -187,11 +192,83 @@ def run_check(md_bytes: bytes, timeout: int | None = None):
         return _read_report(warnings_file)[:3]   # /check 只回三份清单，统计归 /convert
 
 
+def _prepare_template(workdir: Path, uploaded_template: bytes | None,
+                      env: dict) -> Path | None:
+    """用户模板 → 加工好的模板；没有上传就返回 None（convert.sh 用默认模板）。"""
+    if uploaded_template is None:
+        return None
+    (workdir / "uploaded.docx").write_bytes(uploaded_template)
+    # 第三个参数是**基准模板**：用户模板里缺的样式从它补齐。
+    # 不补的话那些样式会悬空引用，Word 回落到默认格式，
+    # 而不是我们这套调好的版式。
+    base = _base_template()
+    cmd = ["python3", "-I", config.PREPARE_TEMPLATE,
+           "uploaded.docx", "template.docx"]
+    if base is not None:
+        cmd.append(str(base))
+    rc, log = _run(cmd, cwd=workdir, timeout=60, env=env,
+                   log_path=workdir / "prepare.log")
+    if rc != 0:
+        last = (log.strip().splitlines() or ["加工失败"])[-1]
+        raise ConvertError("模板不可用：" + last, status=422,
+                           detail=log.strip()[-2000:])
+    return workdir / "template.docx"
+
+
+def _write_images(workdir: Path, images: list[tuple[str, bytes]] | None) -> None:
+    """把上传的图片放进工作目录；解析器会按文件名从里面找。
+
+    保持扁平结构：多文件上传本来就没有目录信息，md 里写 figures/x.png
+    也会按 basename 找到这里的 x.png。
+    """
+    if not images:
+        return
+    if len(images) > config.MAX_IMAGE_COUNT:
+        raise ConvertError(
+            f"图片过多：{len(images)} 张，上限 {config.MAX_IMAGE_COUNT} 张", status=413)
+    uploads = workdir / "_uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    total = 0
+    for name, data in images:
+        try:
+            safe = validate.check_image(name, data)
+        except validate.UploadError as e:
+            raise ConvertError(e.message, status=e.status)
+        total += len(data)
+        if total > config.MAX_IMAGES_TOTAL_BYTES:
+            raise ConvertError(
+                f"图片总量过大，上限 {config.MAX_IMAGES_TOTAL_BYTES / 1048576:.0f} MB",
+                status=413)
+        target = uploads / safe
+        if target.exists():
+            k = 2
+            while (uploads / f"{target.stem}-{k}{target.suffix}").exists():
+                k += 1
+            target = uploads / f"{target.stem}-{k}{target.suffix}"
+        target.write_bytes(data)
+
+
+def _run_convert_one(cwd: Path, md_name: str, out_path: Path,
+                     template_path: Path | None, env: dict, timeout: int,
+                     log_path: Path) -> str:
+    cmd = [config.CONVERT_SH, md_name, out_path]
+    if template_path is not None:
+        cmd.append(str(template_path))
+    rc, log = _run(cmd, cwd=cwd, timeout=timeout, env=env, log_path=log_path)
+    if rc != 0:
+        raise ConvertError("转换失败", status=422, detail=log.strip()[-2000:])
+    if not out_path.exists():
+        raise ConvertError("转换没有产出文件", status=500, detail=log.strip()[-2000:])
+    return log
+
+
 def run_convert(
     md_bytes: bytes,
     template_path: Path | None = None,
     uploaded_template: bytes | None = None,
     timeout: int | None = None,
+    images: list[tuple[str, bytes]] | None = None,
+    name_hint: str | None = None,
 ) -> ConvertResult:
     """完整转换。返回 docx 字节 + 报告（告警 / 自动改动 / 判断）。
 
@@ -203,49 +280,173 @@ def run_convert(
 
     with _workdir() as workdir:
         (workdir / "input.md").write_bytes(md_bytes)
+        _write_images(workdir, images)
         warnings_file = workdir / "warnings.txt"
         env = _prepare_env(workdir, warnings_file)
-
-        if uploaded_template is not None:
-            (workdir / "uploaded.docx").write_bytes(uploaded_template)
-            # 第三个参数是**基准模板**：用户模板里缺的样式从它补齐。
-            # 不补的话那些样式会悬空引用，Word 回落到默认格式，
-            # 而不是我们这套调好的版式。
-            base = _base_template()
-            cmd = ["python3", "-I", config.PREPARE_TEMPLATE,
-                   "uploaded.docx", "template.docx"]
-            if base is not None:
-                cmd.append(str(base))
-            rc, log = _run(
-                cmd, cwd=workdir, timeout=60, env=env, log_path=workdir / "prepare.log",
-            )
-            if rc != 0:
-                last = (log.strip().splitlines() or ["加工失败"])[-1]
-                raise ConvertError("模板不可用：" + last, status=422,
-                                   detail=log.strip()[-2000:])
-            template_path = workdir / "template.docx"
+        # 图片搜索范围限定在本请求目录：上传的图在 _uploads/ 下，
+        # 无论如何都读不到别的请求或服务器上的文件。
+        env["THESIS_RESOURCE_ROOTS"] = str(workdir)
+        template_path = _prepare_template(workdir, uploaded_template, env) or template_path
 
         out_path = workdir / "output.docx"
-        cmd = [config.CONVERT_SH, "input.md", out_path]
-        if template_path is not None:
-            cmd.append(template_path)
-
-        rc, log = _run(cmd, cwd=workdir, timeout=timeout, env=env,
-                       log_path=workdir / "convert.log")
-        if rc != 0:
-            raise ConvertError("转换失败", status=422, detail=log.strip()[-2000:])
-        if not out_path.exists():
-            raise ConvertError("转换没有产出文件", status=500, detail=log.strip()[-2000:])
+        log = _run_convert_one(workdir, "input.md", out_path, template_path,
+                               env, timeout, workdir / "convert.log")
 
         warnings, changes, guesses, stats = _read_report(warnings_file)
         warnings += _resource_warnings(log)      # pandoc 那部分警告单独捞
+        stem = Path(name_hint).stem if name_hint else "output"
         return ConvertResult(
             docx=out_path.read_bytes(),
+            output_name=stem + ".docx",
             warnings=warnings,
             changes=changes,
             guesses=guesses,
             stats=stats,
         )
+
+
+# ---------- 压缩包（md + 图片，可能多个 md） ----------
+
+def _natural_key(s: str):
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
+
+
+def _doc_title(stem: str) -> str:
+    """文件名当大标题：去掉开头的「1. / 2、」这类序号。"""
+    return re.sub(r"^\s*\d+\s*[.、)]\s*", "", stem).strip() or stem
+
+
+_H1_LINE = re.compile(r"^\s{0,3}#\s+\S")
+_FENCE_LINE = re.compile(r"^\s*(```|~~~)")
+
+
+def _has_single_h1(text: str) -> bool:
+    """md 里恰好有一个一级标题 → 用它当大标题，不要用文件名覆盖。
+
+    多文件包里「文件名当标题」只是**兜底**：
+      · 0 个 H1（分章笔记）        → 用文件名
+      · 2 个以上 H1（层级有歧义）  → 用文件名，H1 全部降为章节
+      · 恰好 1 个 H1（完整论文）   → 保留它（否则真正的标题会被降成第一章）
+    """
+    count = 0
+    in_fence = False
+    for line in text.splitlines():
+        if _FENCE_LINE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if _H1_LINE.match(line):
+            count += 1
+            if count > 1:
+                return False
+    return count == 1
+
+
+def _unique_name(name: str, used: set[str]) -> str:
+    if name not in used:
+        used.add(name)
+        return name
+    stem, ext = os.path.splitext(name)
+    k = 2
+    while f"{stem} ({k}){ext}" in used:
+        k += 1
+    out = f"{stem} ({k}){ext}"
+    used.add(out)
+    return out
+
+
+def run_convert_package(
+    package_bytes: bytes,
+    template_path: Path | None = None,
+    uploaded_template: bytes | None = None,
+    timeout: int | None = None,
+    name_hint: str | None = None,
+) -> ConvertResult:
+    """转换一个压缩包（zip / tar 系 / 7z / rar）：可能有多个 md。
+
+    · 一个 md  → 返回一个 docx
+    · 多个 md  → 每个 md 一个 docx，打包成 zip 返回（空 md 也出一个空 docx）
+    · 大标题取自文件名（多 md 时），md 里的 H1 降为章节
+    """
+    timeout = timeout or config.CONVERT_TIMEOUT
+
+    with _workdir() as workdir:
+        root = workdir / "pkg"
+        try:
+            archive.extract(package_bytes, root)
+        except validate.UploadError as e:
+            raise ConvertError(e.message, status=e.status)
+
+        mds = sorted(
+            [p for p in root.rglob("*")
+             if p.is_file() and p.suffix.lower() in (".md", ".markdown")
+             and not any(part.startswith(".") for part in p.relative_to(root).parts)],
+            key=lambda p: _natural_key(str(p.relative_to(root))))
+        if not mds:
+            raise ConvertError("压缩包里没有 markdown 文件（.md）", status=422)
+        if len(mds) > config.MAX_PACKAGE_MD_FILES:
+            raise ConvertError(
+                f"压缩包里的 markdown 过多：{len(mds)} 个，上限 "
+                f"{config.MAX_PACKAGE_MD_FILES} 个", status=413)
+
+        env = _prepare_env(workdir, workdir / "warnings.txt")
+        template_path = _prepare_template(workdir, uploaded_template, env) or template_path
+        multi = len(mds) > 1
+
+        docs = []
+        all_warnings: list[str] = []
+        all_changes: list[str] = []
+        all_guesses: list[str] = []
+        all_stats: list[dict] = []
+        for i, md in enumerate(mds):
+            rel = md.relative_to(root).as_posix()
+            prefix = f"{rel}：" if multi else ""
+            wf = workdir / f"warnings-{i}.jsonl"
+            doc_env = _prepare_env(workdir, wf)
+            # 搜索根 = 解压出来的整个包：md 在 reports/ 里引用 ../figures/a.png
+            # 也能找到，但读不到包外的任何文件。
+            doc_env["THESIS_RESOURCE_ROOTS"] = str(root)
+            if multi:
+                # 有且只有一个 H1 的 md 自己就有大标题，别用文件名覆盖它
+                try:
+                    text = md.read_text(encoding="utf-8-sig", errors="replace")
+                except OSError:
+                    text = ""
+                if not _has_single_h1(text):
+                    doc_env["THESIS_DOC_TITLE"] = _doc_title(md.stem)
+            out = workdir / f"out-{i}.docx"
+            log = _run_convert_one(md.parent, md.name, out, template_path,
+                                   doc_env, timeout, workdir / f"convert-{i}.log")
+            w, c, g, s = _read_report(wf)
+            all_warnings += [prefix + x for x in w] + _resource_warnings(log)
+            all_changes += [prefix + x for x in c]
+            all_guesses += [prefix + x for x in g]
+            if multi:
+                all_stats += [{"label": f"{md.stem} · {x['label']}", "message": x["message"]}
+                              for x in s]
+            else:
+                all_stats += s
+            docs.append((md, out))
+
+        if not multi:
+            md, out = docs[0]
+            return ConvertResult(docx=out.read_bytes(),
+                                 output_name=md.stem + ".docx",
+                                 warnings=all_warnings, changes=all_changes,
+                                 guesses=all_guesses, stats=all_stats)
+
+        buf = io.BytesIO()
+        used: set[str] = set()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for md, out in docs:
+                zf.write(out, _unique_name(md.stem + ".docx", used))
+        stem = Path(name_hint).stem if name_hint else "converted"
+        return ConvertResult(docx=buf.getvalue(),
+                             output_name=f"{stem}-docx.zip",
+                             is_zip=True,
+                             warnings=all_warnings, changes=all_changes,
+                             guesses=all_guesses, stats=all_stats)
 
 
 # ---------- 模板 ----------

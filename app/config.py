@@ -47,6 +47,13 @@ CONVERT_TIMEOUT = _int("CONVERT_TIMEOUT", 120)  # 秒
 MAX_MD_BYTES = _int("MAX_MD_BYTES", 5 * 1024 * 1024)  # 5 MB，markdown 是纯文本，够大了
 MAX_TEMPLATE_BYTES = _int("MAX_TEMPLATE_BYTES", 20 * 1024 * 1024)  # 20 MB
 
+# --- 图片（可以单独上传，也可以跟在 zip 里）---
+MAX_IMAGE_BYTES = _int("MAX_IMAGE_BYTES", 10 * 1024 * 1024)        # 单张 10 MB
+MAX_IMAGES_TOTAL_BYTES = _int("MAX_IMAGES_TOTAL_BYTES", 50 * 1024 * 1024)  # 一批 50 MB
+MAX_IMAGE_COUNT = _int("MAX_IMAGE_COUNT", 60)                       # 一批最多 60 张
+MAX_PACKAGE_MD_FILES = _int("MAX_PACKAGE_MD_FILES", 50)             # 一个包里最多 50 个 md
+MAX_PACKAGE_BYTES = _int("MAX_PACKAGE_BYTES", 60 * 1024 * 1024)     # 上传的 zip 本身
+
 # --- 不可信 docx 的 zip 安全阈值 ---
 MAX_ZIP_ENTRIES = _int("MAX_ZIP_ENTRIES", 2000)
 MAX_UNCOMPRESSED_BYTES = _int("MAX_UNCOMPRESSED_BYTES", 200 * 1024 * 1024)  # 解压后总量上限

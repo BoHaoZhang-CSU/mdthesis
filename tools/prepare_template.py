@@ -42,6 +42,11 @@ zin = zipfile.ZipFile(src)
 REQUIRED_STYLES = [
     # 我们自己用的（filter 按 custom-style 指定）
     "摘要上标题", "摘要", "目录两个字",
+    # 图片段落（居中）与图题（黑体·五号·居中）。用户模板里没有时从基准模板补齐，
+    # 否则 custom-style 悬空，Word 会回落到正文格式（图片左对齐、图题不居中）。
+    "图片", "图下面的文字",
+    # 无序列表转正文后的嵌套层级缩进（左缩进 2/4/6 字符）
+    "列表正文二级", "列表正文三级", "列表正文四级",
     # pandoc 的段落样式（按 w:name 匹配）
     "heading 1", "heading 2", "heading 3", "heading 4", "heading 5",
     "heading 6", "heading 7", "heading 8", "heading 9",
@@ -292,6 +297,75 @@ def add_equation_style(styles_xml, doc_xml):
     return styles_xml.replace("</w:styles>", style + "</w:styles>", 1)
 
 
+UNNUMBERED_STYLE_NAME = "不编号标题"
+
+
+def add_unnumbered_heading_style(styles_xml):
+    """照 heading 2 克隆一个「不编号标题」样式（参考文献/致谢/附录用）。
+
+    中文论文里这些部分不参与章号；直接改 heading 2 会把正文章节也改掉，
+    所以克隆一份，只把 numId 换成 0（关闭自动编号），
+    分页、大纲级别、字号全部沿用用户模板的 heading 2。
+    """
+    if re.search(r'<w:name w:val="%s"\s*/>' % re.escape(UNNUMBERED_STYLE_NAME), styles_xml):
+        print("  不编号标题样式已存在，跳过")
+        return styles_xml
+    m = re.search(
+        r'<w:style [^>]*w:styleId="([^"]+)"[^>]*>\s*<w:name w:val="heading 2"\s*/>.*?</w:style>',
+        styles_xml, re.S)
+    if not m:
+        print("  模板里没有 heading 2，不编号标题样式跳过")
+        return styles_xml
+    style = m.group(0)
+    # 换 styleId / name，并标成自定义样式
+    style = re.sub(r'w:styleId="[^"]+"', 'w:styleId="%s"' % UNNUMBERED_STYLE_NAME,
+                   style, count=1)
+    style = style.replace('<w:name w:val="heading 2"/>',
+                          '<w:name w:val="%s"/>' % UNNUMBERED_STYLE_NAME, 1)
+    if "w:customStyle" not in style:
+        style = style.replace("<w:style ", '<w:style w:customStyle="1" ', 1)
+    # 关闭自动编号；其余属性（pageBreakBefore / outlineLvl / 字体）保留
+    if re.search(r"<w:numPr>.*?</w:numPr>", style, re.S):
+        style = re.sub(r"<w:numPr>.*?</w:numPr>",
+                       '<w:numPr><w:numId w:val="0"/></w:numPr>',
+                       style, count=1, flags=re.S)
+    else:
+        style = style.replace("<w:pPr>", '<w:pPr><w:numPr><w:numId w:val="0"/></w:numPr>', 1)
+    print(f"  加上「{UNNUMBERED_STYLE_NAME}」样式（照 heading 2 克隆，关闭自动编号）")
+    return styles_xml.replace("</w:styles>", style + "</w:styles>", 1)
+
+
+LIST_STYLE_NAMES = ["列表正文二级", "列表正文三级", "列表正文四级"]
+
+
+def add_list_styles(styles_xml):
+    """加三个「列表正文」样式：左缩进 2/4/6 字符、首行不额外缩进。
+
+    无序列表转正文后，嵌套层级靠左缩进体现（一级项用 Body Text，自带首行缩进 2 字）。
+    样式已存在就不动。
+    """
+    m = re.search(
+        r'<w:style [^>]*w:styleId="([^"]+)"[^>]*>\s*<w:name w:val="Body Text"\s*/>',
+        styles_xml, re.S)
+    base = m.group(1) if m else "Normal"
+    added = []
+    for level, name in enumerate(LIST_STYLE_NAMES, start=1):
+        if re.search(r'<w:name w:val="%s"\s*/>' % re.escape(name), styles_xml):
+            continue
+        left = 480 * level          # 480 twips = 2 个汉字（小四）
+        style = (
+            f'<w:style w:type="paragraph" w:customStyle="1" w:styleId="{name}">'
+            f'<w:name w:val="{name}"/><w:basedOn w:val="{base}"/><w:qFormat/>'
+            f'<w:pPr><w:ind w:left="{left}" w:firstLine="0" w:firstLineChars="0"/></w:pPr>'
+            f'</w:style>'
+        )
+        styles_xml = styles_xml.replace("</w:styles>", style + "</w:styles>", 1)
+        added.append(name)
+    if added:
+        print("  加上列表正文样式：" + "、".join(added))
+    return styles_xml
+
+
 def fix_table_style_id(styles_xml):
     """把表格样式的 styleId 改成 "Table"。
 
@@ -386,8 +460,10 @@ if has_donor:
 styles = set_page_break(styles)
 styles = fix_table_style_id(styles)
 styles = fix_outline_levels(styles)
+styles = add_unnumbered_heading_style(styles)
 styles = add_equation_style(styles, doc_body)
 styles = add_caption_style(styles)
+styles = add_list_styles(styles)
 
 # --- 找出要删的 media 及其关系 ---
 rels_name = "word/_rels/document.xml.rels"

@@ -35,7 +35,24 @@
 
 -- 这次转换做了什么改动，最后汇总报告给调用方（网页界面会展示给用户看）。
 -- 必须声明在所有用到它的函数之前 —— Lua 的 local 没有提升。
-local stats = { stripped = 0, hr_dropped = 0, h1_demoted = 0, toc_dropped = 0, delims = 0 }
+local stats = { stripped = 0, hr_dropped = 0, h1_demoted = 0, toc_dropped = 0,
+                delims = 0, image_captions = 0, captions_from_name = 0,
+                captions_number_only = 0, formula_blocks = 0, formula_lines = 0,
+                text_blocks = 0, inline_codes = 0, bullets_flattened = 0 }
+
+--[[
+  多文件包（zip 里多个 md）模式下的「大标题」。
+
+  服务端把文件名（去扩展名）放进 THESIS_DOC_TITLE。一包多个 md 说明是
+  「章节集合」，每个文件自己的标题就是文件名 —— 于是：
+    · 所有一级标题降级成章（它们本来就是各章的小节）
+    · 文档开头补一个大标题段落
+
+  单 md 上传不设这个变量，行为与从前完全一致。
+  空文档不补标题（用户要的就是一个空 docx）。
+]]
+local DOC_TITLE = os.getenv("THESIS_DOC_TITLE")
+if DOC_TITLE == "" then DOC_TITLE = nil end
 
 --[[
   角色样式映射（由 tools/prepare_template.py 生成，convert.sh 通过环境变量传进来）。
@@ -48,7 +65,7 @@ local stats = { stripped = 0, hr_dropped = 0, h1_demoted = 0, toc_dropped = 0, d
   那些名字由 prepare_template 从基准模板补齐，一定存在。
 ]]
 local STYLE = { title = "摘要上标题", abstract = "摘要", toc = "目录两个字",
-                equation = "公式" }
+                equation = "公式", unnumbered = "不编号标题" }
 
 -- 中文章节序号。Lua 模式没有 | 交替，且 [一二三] 按字节匹配不安全，
 -- 所以用「找顿号 -> 比对表」的方式做精确前缀匹配。
@@ -201,9 +218,30 @@ end
 ]]
 local eq_chapter, eq_count = 0, 0
 
+--[[
+  「不编号章节」：摘要、目录、参考文献、致谢、附录……（用户 2026-10-17 报）
+
+  这些标题在论文里不占章号，也不应该把后面的章号顶走。
+  模板里 heading 2 带自动编号（numId=1），所以给它们套一个
+  「不编号标题」样式（prepare_template 照 heading 2 克隆、numId=0）。
+]]
+local UNNUMBERED_HEADING = {
+  ["摘要"] = true, ["目录"] = true, ["参考文献"] = true,
+  ["参考资料"] = true, ["致谢"] = true, ["符号说明"] = true,
+}
+
+local function is_unnumbered_heading(txt)
+  local t = (txt or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if UNNUMBERED_HEADING[t] then return true end
+  if t:lower() == "abstract" then return true end
+  if t:sub(1, #"附录") == "附录" then return true end
+  if t:sub(1, #"攻读学位期间") == "攻读学位期间" then return true end
+  return false
+end
+
 local function is_chapter_header(b)
   if b.t ~= "Header" or b.level ~= 2 then return false end
-  return not pandoc.utils.stringify(b.content):match("^%s*摘要%s*$")
+  return not is_unnumbered_heading(pandoc.utils.stringify(b.content))
 end
 
 -- 目测标记：零宽空格。后处理脚本靠它认出「公式表格」并去掉边框
@@ -226,11 +264,6 @@ local function equation_table(math_el, num)
       if el.text == "XXXNUMXXX" then return pandoc.Str(num) end
     end,
   }).blocks[1]
-end
-
-local function is_chapter_header(b)
-  if b.t ~= "Header" or b.level ~= 2 then return false end
-  return not pandoc.utils.stringify(b.content):match("^%s*摘要%s*$")
 end
 
 local function number_equations(blocks)
@@ -301,8 +334,8 @@ local seen_h1 = false
 local function Header(el)
   local txt = pandoc.utils.stringify(el.content)
 
-  -- 统计章节数（给「识别结果」用）。摘要不是编号章节，不算进去。
-  if el.level == 2 and not txt:match("^%s*摘要%s*$") then
+  -- 统计章节数（给「识别结果」用）。摘要/参考文献/致谢/附录等不编号章节不算。
+  if el.level == 2 and not is_unnumbered_heading(txt) then
     stats.chapters = stats.chapters + 1
   elseif el.level == 3 then
     stats.sections = stats.sections + 1
@@ -313,19 +346,31 @@ local function Header(el)
 
   -- 1. 文档大标题：只有第一个一级标题算
   if el.level == 1 then
-    if not seen_h1 then
+    if DOC_TITLE then
+      -- 包内多文件模式：大标题取自文件名，md 里的 H1 一律当章节
+      el.level = 2
+      stats.h1_demoted = stats.h1_demoted + 1
+    elseif not seen_h1 then
       seen_h1 = true
       return styled(el, STYLE.title)
+    else
+      -- 又出现一个一级标题：说明这篇 md 的层级用法有歧义（Pandoc 里会出告警）。
+      -- 降级成章节，至少让文档结构不至于全烂。
+      el.level = 2
+      stats.h1_demoted = stats.h1_demoted + 1
     end
-    -- 又出现一个一级标题：说明这篇 md 的层级用法有歧义（Pandoc 里会出告警）。
-    -- 降级成章节，至少让文档结构不至于全烂。
-    el.level = 2
-    stats.h1_demoted = stats.h1_demoted + 1
   end
 
   -- 2. 摘要标题：必须脱离自动编号序列
   if el.level == 2 and txt:match("^%s*摘要%s*$") then
     return styled(el, STYLE.abstract)
+  end
+
+  -- 2.5 不编号章节：参考文献 / 致谢 / 附录 / 目录 / Abstract …
+  --     套「不编号标题」样式（照 heading 2 克隆、numId=0），不占章号，
+  --     也不影响后面章节的自动编号。
+  if el.level == 2 and is_unnumbered_heading(txt) then
+    return styled(el, STYLE.unnumbered)
   end
 
   -- 3. 去掉手写编号，保留标题语义（编号交给 Word 自动生成）
@@ -681,20 +726,97 @@ local function caption_of(p)
   local c = p.content
   if #c ~= 1 or c[1].t ~= "Strong" then return nil end
   local txt = pandoc.utils.stringify(c[1].content)
-  local kind = nil
-  if txt:match("^%s*表") then kind = "表"
-  elseif txt:match("^%s*图") then kind = "图" end
-  if not kind then return nil end
-  local rest = txt:gsub("^%s*" .. kind, "", 1)
-  rest = rest:gsub("^%s*[%d%.%-]+", "", 1)      -- 手写的号：10 / 2.1 / 2-1
-  rest = rest:gsub("^%s*：", "", 1)
-  rest = rest:gsub("^%s*:", "", 1)
-  rest = rest:gsub("^%s+", ""):gsub("%s+$", "")
-  if rest == "" then return nil end
-  return kind, rest
+  local lead = txt:gsub("^%s+", "")
+  for _, kind in ipairs({ "表", "图" }) do
+    if lead:sub(1, #kind) == kind then
+      local after = lead:sub(#kind + 1)
+      -- ⚠️ 只有后面跟数字/空白/冒号/结尾时才算题注。
+      -- 否则「**图表解读：…**」「**表示…**」这类正文小标题会被误当成图题，
+      -- 被拆成「图 + 表解读：…」（真实样本踩到）。
+      if after == "" or after:match("^%d") or after:match("^%s")
+         or after:match("^[：:]") then
+        local rest = after
+        rest = rest:gsub("^%s*[%d%.%-]+", "", 1)      -- 手写的号：10 / 2.1 / 2-1
+        rest = rest:gsub("^%s*[：:]", "", 1)
+        rest = rest:gsub("^%s+", ""):gsub("%s+$", "")
+        if rest == "" then return nil end
+        return kind, rest
+      end
+    end
+  end
+  return nil
 end
 
 local cap_chapter, cap_n = 0, { ["表"] = 0, ["图"] = 0 }
+
+--[[
+  图片（2026-10-17 用户要求）
+
+  · 独立成段的图片套模板的「图片」样式（居中）
+  · **每张图都出题注**，图号一律按章、按出现顺序重编
+  · 题注文字优先级：图下加粗行 > alt / Obsidian 别名 > 文件名
+  · 纯编号文件名（2-1.png）只出「图2-1」，不重复旧号；
+    描述性文件名（云服务器架构.png）出「图2-1 云服务器架构」
+  · 行内图（正文里夹着的）完全不动
+]]
+local function image_inlines(b)
+  -- 返回 (inlines, Image, 原块)；不是「独立成段的图片」则返回 nil
+  if b.t == "Para" and #b.content == 1 and b.content[1].t == "Image" then
+    return b.content, b.content[1], b
+  end
+  if b.t == "Figure" then
+    local img = nil
+    b:walk({ Image = function(el) if not img then img = el end end })
+    if not img then return nil end
+    for _, blk in ipairs(b.content) do
+      if (blk.t == "Plain" or blk.t == "Para") and blk.content then
+        return blk.content, img, b
+      end
+    end
+  end
+  return nil
+end
+
+local function figure_text(b)
+  if b.t ~= "Figure" then return "" end
+  local ok, txt = pcall(function() return pandoc.utils.stringify(b.caption) end)
+  if ok and txt then return txt:gsub("^%s+", ""):gsub("%s+$", "") end
+  return ""
+end
+
+-- 去掉「图」「图2-1」「2-1」「：」这些前缀，只留说明本身；返回空串 = 只要编号
+local function clean_caption_text(txt, kind)
+  txt = (txt or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if kind == "图" then
+    local had_kind = txt:match("^图") ~= nil
+    if had_kind then txt = txt:gsub("^图%s*", "", 1) end
+    local rest = txt:gsub("^%d+[%-%.]%d+%s*", "", 1)
+    if rest == txt and (had_kind or txt:match("^%d+%s") ) then
+      rest = txt:gsub("^%d+%s+", "", 1)
+    end
+    txt = rest
+  end
+  txt = txt:gsub("^%s*[：:]%s*", "", 1)
+  return (txt:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function next_number(kind)
+  cap_n[kind] = cap_n[kind] + 1
+  return (cap_chapter > 0)
+    and string.format("%s%d-%d", kind, cap_chapter, cap_n[kind])
+    or string.format("%s%d", kind, cap_n[kind])
+end
+
+-- custom-style 只能靠「Div 包 Plain」生效（直接给 Para 加属性会串到下一段，踩过）
+local function styled_para(inlines, style)
+  return pandoc.Div({ pandoc.Plain(inlines) },
+    pandoc.Attr("", {}, { ["custom-style"] = style }))
+end
+
+local function filename_of(src)
+  local name = (src or ""):match("([^/\\]+)$") or (src or "")
+  return (name:gsub("%.[^%.]*$", ""))
+end
 
 local function number_captions(blocks)
   local out = {}
@@ -705,30 +827,356 @@ local function number_captions(blocks)
       cap_chapter = cap_chapter + 1
       cap_n = { ["表"] = 0, ["图"] = 0 }
       out[#out + 1] = b
-    elseif b.t == "Para" then
-      local kind, rest = caption_of(b)
-      local adjacent = false
-      if kind == "表" then
+    else
+      local inlines, img, orig = image_inlines(b)
+      if inlines then
+        -- 图片段落：先套「图片」样式（居中）
+        out[#out + 1] = styled_para(inlines, "图片")
+        -- 下一行是加粗图题？那就交给它，别出第二个题注（踩过：alt + 加粗行 = 双题注）
         local nxt = blocks[i + 1]
-        adjacent = nxt ~= nil and nxt.t == "Table"
-      elseif kind == "图" then
-        local prv = blocks[i - 1]
-        if prv then prv:walk({ Image = function() adjacent = true end }) end
-      end
-      if kind and adjacent then
-        cap_n[kind] = cap_n[kind] + 1
-        local num = (cap_chapter > 0)
-          and string.format("%s%d-%d", kind, cap_chapter, cap_n[kind])
-          or string.format("%s%d", kind, cap_n[kind])
-        stats.captions = stats.captions + 1
-        -- custom-style 只能靠「Div 包 Plain」生效（直接给 Para 加属性会串到下一段，踩过）
-        out[#out + 1] = pandoc.Div(
-          { pandoc.Plain({ pandoc.Str(num .. " " .. rest) }) },
-          pandoc.Attr("", {}, { ["custom-style"] = STYLE_CAPTION[kind] })
-        )
+        local bold_kind = nil
+        if nxt and nxt.t == "Para" then bold_kind = caption_of(nxt) end
+        if bold_kind ~= "图" then
+          local txt = clean_caption_text(figure_text(orig), "图")
+          if txt == "" then
+            local from_name = clean_caption_text(filename_of(img.src), "图")
+            txt = from_name
+            if from_name ~= "" then
+              stats.captions_from_name = stats.captions_from_name + 1
+            else
+              stats.captions_number_only = stats.captions_number_only + 1
+            end
+          end
+          local num = next_number("图")
+          stats.captions = stats.captions + 1
+          stats.image_captions = stats.image_captions + 1
+          out[#out + 1] = styled_para(
+            { pandoc.Str(num .. ((txt ~= "") and (" " .. txt) or "")) },
+            STYLE_CAPTION["图"])
+        end
+      elseif b.t == "Para" then
+        local kind, rest = caption_of(b)
+        local adjacent = false
+        if kind == "表" then
+          local nxt = blocks[i + 1]
+          adjacent = nxt ~= nil and nxt.t == "Table"
+        elseif kind == "图" then
+          local prv = blocks[i - 1]
+          if prv then prv:walk({ Image = function() adjacent = true end }) end
+        end
+        if kind and adjacent then
+          local num = next_number(kind)
+          stats.captions = stats.captions + 1
+          out[#out + 1] = styled_para({ pandoc.Str(num .. " " .. rest) },
+                                      STYLE_CAPTION[kind])
+        else
+          out[#out + 1] = b
+        end
       else
         out[#out + 1] = b
       end
+    end
+  end
+  return out
+end
+
+-- ── 代码块里的公式 / 行内代码（2026-10-17 用户要求）───────────────────────
+-- AI 生成的报告常把公式写进 ```text 代码块：
+--     Age_scaled = (Age - 训练集年龄均值) / 训练集年龄标准差
+-- 走 Source Code 样式（Fira Code + 5% 灰底）很难看；这里把它们转成真正的
+-- Word 公式，并沿用按章编号。判定保持保守，转换结果作为「猜测」汇报。
+--
+-- 语言标记：
+--   math / latex / tex  → 无条件当公式
+--   python / js / bash … → 永远是代码
+--   text / 无语言        → 逐行判定；像代码的整块保留；公式行转公式，
+--                          其余行转普通正文（用户拍板）
+local MATH_LANGS = { math = true, latex = true, tex = true }
+local CODE_LANGS = {
+  python = true, py = true, javascript = true, js = true, typescript = true, ts = true,
+  bash = true, sh = true, shell = true, zsh = true, c = true, cpp = true, ["c++"] = true,
+  ["c#"] = true, java = true, go = true, rust = true, sql = true, json = true,
+  yaml = true, yml = true, xml = true, html = true, css = true, ruby = true, php = true,
+  swift = true, kotlin = true, scala = true, r = true, matlab = true,
+  powershell = true, ps1 = true, dockerfile = true, makefile = true,
+  -- 显式「这就是代码」的标记：内容再像公式也保持 Source Code
+  code = true,
+}
+local RELATIONS = { "==", "=", "≈", "≤", "≥", "≠" }
+local MATH_FUNCS = { ln = true, log = true, lg = true, sin = true, cos = true,
+                     tan = true, sqrt = true, exp = true, max = true, min = true,
+                     abs = true }
+local UNI_OPS = {
+  ["×"] = "\\times ", ["÷"] = "\\div ", ["−"] = "-", ["≤"] = "\\le ",
+  ["≥"] = "\\ge ", ["≠"] = "\\ne ", ["≈"] = "\\approx ", ["±"] = "\\pm ",
+  ["∑"] = "\\sum ", ["∫"] = "\\int ", ["√"] = "\\surd ",
+}
+local CODE_TOKENS = { ";", "{", "}", "[", "]", "#", "//", "/*", '"', "'", "`",
+  "def ", "import ", "return ", "print(", "function ", "class ", "for ", "while ",
+  "if (", "=>", "->", "::" }
+
+local function has_non_ascii(s)
+  for i = 1, #s do if s:byte(i) > 127 then return true end end
+  return false
+end
+
+local function latex_escape(s)
+  s = s:gsub("\\", "\\backslash ")
+  s = s:gsub("([{}_%%&#$])", "\\%1")
+  return s
+end
+
+local function is_formula_line(s)
+  s = s:gsub("^%s+", ""):gsub("%s+$", "")
+  if s == "" or #s > 200 then return false end
+  local rel = false
+  for _, r in ipairs(RELATIONS) do
+    if s:find(r, 1, true) then rel = true; break end
+  end
+  if not rel then return false end
+  for _, tok in ipairs(CODE_TOKENS) do
+    if s:find(tok, 1, true) then return false end
+  end
+  if has_non_ascii(s) then return true end
+  for c in s:gmatch(".") do
+    if c == "+" or c == "-" or c == "*" or c == "/" or c == "^" then return true end
+  end
+  for sym in pairs(UNI_OPS) do
+    if s:find(sym, 1, true) then return true end
+  end
+  for fn in pairs(MATH_FUNCS) do
+    if s:find(fn .. "(", 1, true) then return true end
+  end
+  return false
+end
+
+local function looks_like_code(lines)
+  for _, l in ipairs(lines) do
+    for _, tok in ipairs(CODE_TOKENS) do
+      if l:find(tok, 1, true) then return true end
+    end
+  end
+  return false
+end
+
+local function is_digit(c) return c ~= "" and c:match("%d") ~= nil end
+local function is_alpha(c) return c ~= "" and c:match("[A-Za-z]") ~= nil end
+
+-- 一行文本 → LaTeX。中文走 \text{}，标识符走 \mathit{}，函数名走 \ln 等。
+local function line_to_latex(line)
+  local out, i, n = {}, 1, #line
+  while i <= n do
+    local c = line:sub(i, i)
+    local b = line:byte(i)
+    if b > 127 and not UNI_OPS[c] then
+      -- 文本段：吃掉后面的 中文/数字/空格/常见标点，遇到 ASCII 字母或运算符停
+      local j = i
+      while j <= n do
+        local cj, bj = line:sub(j, j), line:byte(j)
+        if bj > 127 and not UNI_OPS[cj] then j = j + 1
+        elseif cj:match("[%d%s%.,:;%%]") then j = j + 1
+        else break end
+      end
+      out[#out + 1] = "\\text{" .. latex_escape(line:sub(i, j - 1)) .. "}"
+      i = j
+    elseif is_alpha(c) then
+      local j = i + 1
+      while j <= n and line:sub(j, j):match("[%w_]") do j = j + 1 end
+      local w = line:sub(i, j - 1)
+      local lw = w:lower()
+      if MATH_FUNCS[lw] and line:sub(j, j) == "(" then
+        out[#out + 1] = "\\" .. lw
+      else
+        out[#out + 1] = "\\mathit{" .. latex_escape(w) .. "}"
+      end
+      i = j
+    elseif is_digit(c) or (c == "." and is_digit(line:sub(i + 1, i + 1))) then
+      local j = i
+      while j <= n and line:sub(j, j):match("[%d%.]") do j = j + 1 end
+      out[#out + 1] = line:sub(i, j - 1)
+      i = j
+    else
+      local two = line:sub(i, i + 1)
+      if two == "==" then out[#out + 1] = "="; i = i + 2
+      elseif two == "<=" then out[#out + 1] = "\\le "; i = i + 2
+      elseif two == ">=" then out[#out + 1] = "\\ge "; i = i + 2
+      elseif two == "!=" then out[#out + 1] = "\\ne "; i = i + 2
+      elseif UNI_OPS[c] then out[#out + 1] = UNI_OPS[c]; i = i + 1
+      elseif c == "*" then out[#out + 1] = "\\cdot "; i = i + 1
+      elseif c == "%" then out[#out + 1] = "\\%"; i = i + 1
+      elseif c == "_" or c == "&" or c == "#" then out[#out + 1] = "\\" .. c; i = i + 1
+      elseif c == "\\" then out[#out + 1] = "\\backslash "; i = i + 1
+      else out[#out + 1] = c; i = i + 1 end
+    end
+  end
+  return table.concat(out)
+end
+
+local function formula_latex(converted)
+  if #converted == 1 then return converted[1] end
+  return "\\begin{array}{l}\n" .. table.concat(converted, " \\\\\n") .. "\n\\end{array}"
+end
+
+local function text_lines_para(lines)
+  local inl = {}
+  for i, l in ipairs(lines) do
+    if i > 1 then inl[#inl + 1] = pandoc.LineBreak() end
+    inl[#inl + 1] = pandoc.Str(l)
+  end
+  return pandoc.Para(inl)
+end
+
+-- 返回：新块列表、公式块数、公式行数、转成正文的块数
+local function convert_code_blocks(blocks)
+  local out, n_formula, n_lines, n_text = {}, 0, 0, 0
+  for _, b in ipairs(blocks) do
+    if b.t ~= "CodeBlock" then
+      out[#out + 1] = b
+    else
+      local lang = (b.classes[1] or ""):lower()
+      local lines = {}
+      for line in (b.text .. "\n"):gmatch("(.-)\n") do
+        local t = line:gsub("^%s+", ""):gsub("%s+$", "")
+        if t ~= "" then lines[#lines + 1] = t end
+      end
+      if MATH_LANGS[lang] then
+        if #lines > 0 then
+          local converted = {}
+          for _, l in ipairs(lines) do converted[#converted + 1] = l end
+          out[#out + 1] = pandoc.Para({ pandoc.Math("DisplayMath", formula_latex(converted)) })
+          n_formula = n_formula + 1
+          n_lines = n_lines + #lines
+        end
+      elseif CODE_LANGS[lang] then
+        out[#out + 1] = b
+      elseif #lines == 0 then
+        -- 空代码块：丢掉
+      elseif looks_like_code(lines) then
+        -- 没写语言但确实是代码：保持 Source Code，别动
+        out[#out + 1] = b
+      else
+        local has_formula = false
+        for _, l in ipairs(lines) do
+          if is_formula_line(l) then has_formula = true; break end
+        end
+        if not has_formula then
+          out[#out + 1] = text_lines_para(lines)
+          n_text = n_text + 1
+        else
+          local run, text_run = {}, {}
+          local function flush_run()
+            if #run == 0 then return end
+            out[#out + 1] = pandoc.Para({ pandoc.Math("DisplayMath", formula_latex(run)) })
+            run = {}
+          end
+          local function flush_text()
+            if #text_run == 0 then return end
+            out[#out + 1] = text_lines_para(text_run)
+            text_run = {}
+          end
+          for _, l in ipairs(lines) do
+            if is_formula_line(l) then
+              flush_text()
+              run[#run + 1] = line_to_latex(l)
+              n_lines = n_lines + 1
+            else
+              flush_run()
+              text_run[#text_run + 1] = l
+            end
+          end
+          flush_run(); flush_text()
+          n_formula = n_formula + 1
+        end
+      end
+    end
+  end
+  return out, n_formula, n_lines, n_text
+end
+
+-- ── 无序列表（2026-10-17 用户要求）─────────────────────────────────────────
+-- 论文/报告的规范做法是「分条列项用编号 + 按层级缩进」，不用 • 项目符号
+-- （GB/T 7713.1、各校撰写规范；这份模板的原论文正文也没有 bullet）。
+--   一级项   → 正文段落（首行缩进 2 字，模板 Body Text 自带）
+--   二级及以下 → 左缩进 2 字符/级 +「（1）（2）」编号（每个父项内重新计数）
+-- 有序列表保持 Word 自动编号，不动。
+local LIST_STYLE = { [1] = "列表正文二级", [2] = "列表正文三级", [3] = "列表正文四级" }
+
+local flatten_bullets
+local function map_list_items(items, level)
+  local out = {}
+  for _, item in ipairs(items) do
+    out[#out + 1] = flatten_bullets(item, level)
+  end
+  return out
+end
+
+local function map_table_cells(tbl, level)
+  local function do_rows(rows)
+    for _, row in ipairs(rows) do
+      for _, cell in ipairs(row.cells) do
+        cell.contents = flatten_bullets(cell.contents, level)
+      end
+    end
+  end
+  if tbl.head then do_rows(tbl.head.rows) end
+  for _, body in ipairs(tbl.bodies or {}) do do_rows(body.body) end
+  if tbl.foot then do_rows(tbl.foot.rows) end
+  return tbl
+end
+
+flatten_bullets = function(blocks, level)
+  local out = {}
+  for _, b in ipairs(blocks) do
+    if b.t == "BulletList" then
+      local n = 0
+      for _, item in ipairs(b.content) do
+        n = n + 1
+        stats.bullets_flattened = stats.bullets_flattened + 1
+        local first = true
+        for _, ib in ipairs(item) do
+          if ib.t == "BulletList" then
+            local sub = flatten_bullets({ ib }, level + 1)
+            for _, x in ipairs(sub) do out[#out + 1] = x end
+          elseif ib.t == "OrderedList" then
+            -- 有序列表保留自动编号；里面若还有无序列表，按下一级处理
+            ib.content = map_list_items(ib.content, level + 1)
+            out[#out + 1] = ib
+            first = false
+          elseif ib.t == "Div" or ib.t == "BlockQuote" then
+            ib.content = flatten_bullets(ib.content, level)
+            out[#out + 1] = ib
+            first = false
+          elseif ib.t == "Plain" or ib.t == "Para" then
+            local inl = {}
+            if level > 0 and first then
+              inl[#inl + 1] = pandoc.Str(string.format("（%d）", n))
+            end
+            for _, x in ipairs(ib.content) do inl[#inl + 1] = x end
+            if level > 0 then
+              -- 左缩进靠模板样式；Div 包 Plain 才能让 custom-style 生效（踩过）
+              out[#out + 1] = pandoc.Div(
+                { pandoc.Plain(inl) },
+                pandoc.Attr("", {}, {
+                  ["custom-style"] = LIST_STYLE[math.min(level, 3)],
+                }))
+            else
+              out[#out + 1] = pandoc.Para(inl)
+            end
+            first = false
+          else
+            out[#out + 1] = ib
+            first = false
+          end
+        end
+      end
+    elseif b.t == "Div" or b.t == "BlockQuote" then
+      b.content = flatten_bullets(b.content, level)
+      out[#out + 1] = b
+    elseif b.t == "OrderedList" then
+      b.content = map_list_items(b.content, level + 1)
+      out[#out + 1] = b
+    elseif b.t == "Table" then
+      out[#out + 1] = map_table_cells(b, level)
     else
       out[#out + 1] = b
     end
@@ -741,6 +1189,13 @@ function Pandoc(doc)
   -- 1. 资源引用安全校验 —— 必须在 writer 抓取资源之前跑
   blocked_resources = {}
   doc = check_resources(doc)
+
+  -- 1.2 代码块：公式块 → 真公式（后面统一按章编号）；非代码的 text 块 → 普通正文
+  doc.blocks, stats.formula_blocks, stats.formula_lines, stats.text_blocks =
+    convert_code_blocks(doc.blocks)
+
+  -- 1.3 无序列表 → 正文段落；嵌套项按层级缩进并编号（有序列表保持自动编号）
+  doc.blocks = flatten_bullets(doc.blocks, 0)
 
   -- 1.5 数一数文档里有什么（网页上的「识别结果」）。位置有讲究：
   --     在安全校验**之后**（被拦掉的图片不该算进来）、
@@ -778,7 +1233,7 @@ function Pandoc(doc)
     end
   end
 
-  if #titles > 1 then
+  if #titles > 1 and not DOC_TITLE then
     -- 这既是「需要用户知道的问题」，也是「我的判断」——两个身份都汇报。
     -- to_stderr=true 是为了命令行可见（regression.sh 会 grep 它）。
     emit("guess", string.format(
@@ -792,6 +1247,11 @@ function Pandoc(doc)
   -- 3. 丢掉 markdown 里手写的目录（转换时会生成真正的 Word 目录域）
   stats.toc_dropped = 0
   doc.blocks = strip_manual_toc(doc.blocks)
+
+  -- 3.5 包内多文件：大标题取自文件名。空文档不补（用户要的就是空 docx）。
+  if DOC_TITLE and #doc.blocks > 0 then
+    table.insert(doc.blocks, 1, styled_para({ pandoc.Str(DOC_TITLE) }, STYLE.title))
+  end
 
   -- 4. 判定各层级是否在用手写编号（决定要不要剥）
   strip_level = {}
@@ -808,6 +1268,13 @@ function Pandoc(doc)
   -- 5. 转换
   local out = doc:walk({
     Header = Header,
+    -- 行内代码：模板的 Verbatim Char 是 Fira Code + 灰底，中文/路径/URL 都很难看。
+    -- 用户要求直接按普通英文排；真正的行内公式请用 $…$（不会走到这里）。
+    Code = function(el)
+      if el.text == "" then return nil end
+      stats.inline_codes = stats.inline_codes + 1
+      return pandoc.Str(el.text)
+    end,
     OrderedList = OrderedList,
     BulletList = BulletList,
     Blocks = Blocks,
@@ -828,10 +1295,42 @@ function Pandoc(doc)
         .. "不想编号的公式，用 ::: {.unnumbered} … ::: 包起来；"
         .. "正文里手写的「式（2）」这类引用不会跟着变，请核对。", stats.equations))
   end
-  if stats.captions > 0 then
+  if stats.captions - stats.image_captions > 0 then
     note("change", string.format(
       "给 %d 个表/图题加了编号（按章，形如「表2-1」），并套上模板的题注样式（黑体·五号·居中）。"
-        .. "正文里手写的「由表10可知」这类引用不会跟着变，请核对。", stats.captions))
+        .. "正文里手写的「由表10可知」这类引用不会跟着变，请核对。",
+      stats.captions - stats.image_captions))
+  end
+  if stats.image_captions > 0 then
+    local tail = ""
+    if stats.captions_from_name > 0 then
+      tail = string.format("，其中 %d 张的题注文字取自文件名", stats.captions_from_name)
+    end
+    if stats.captions_number_only > 0 then
+      tail = tail .. string.format("，%d 张只有编号（文件名为纯编号）", stats.captions_number_only)
+    end
+    note("change", string.format(
+      "给 %d 张图片加了题注（按章，形如「图2-1」）%s", stats.image_captions, tail))
+  end
+  if stats.formula_blocks > 0 then
+    note("guess", string.format(
+      "有 %d 个代码块看起来是公式，已转成 Word 公式（共 %d 行，按章编号）。"
+        .. "如果其中有真代码，把代码块的语言标记写成 python / bash 等就不会转。",
+      stats.formula_blocks, stats.formula_lines))
+  end
+  if stats.text_blocks > 0 then
+    note("change", string.format(
+      "把 %d 个非代码的 text 代码块改成了普通正文（等宽字体对中文不友好）",
+      stats.text_blocks))
+  end
+  if stats.inline_codes > 0 then
+    note("change", string.format(
+      "把 %d 处行内代码改成了普通文本（行内公式请用 $…$ 写）", stats.inline_codes))
+  end
+  if stats.bullets_flattened > 0 then
+    note("change", string.format(
+      "把 %d 个无序列表项转成了正文段落（一级项空两字起排，嵌套项按层级缩进并编号）",
+      stats.bullets_flattened))
   end
   if stats.toc_dropped > 0 then
     note("change", "删掉了 markdown 里手写的目录（已自动生成 Word 目录域，格式与模板一致）")
@@ -846,7 +1345,12 @@ function Pandoc(doc)
         .. "pandoc 生成的那种在 WPS 里还会渲染成空心矩形）", stats.hr_dropped))
   end
   if stats.h1_demoted > 0 then
-    note("change", string.format("把 %d 个多余的一级标题降级成了二级标题 ##", stats.h1_demoted))
+    if DOC_TITLE then
+      note("change", string.format(
+        "把 %d 个一级标题降级成了章节（包内多文件：大标题取自文件名）", stats.h1_demoted))
+    else
+      note("change", string.format("把 %d 个多余的一级标题降级成了二级标题 ##", stats.h1_demoted))
+    end
   end
   if stats.latex_rescued and stats.latex_rescued > 0 then
     note("change", string.format(
@@ -865,7 +1369,9 @@ function Pandoc(doc)
   end
 
   -- 7. 识别结果：让用户一眼看出「我们从他文档里读到了什么」，识别错了当场就能发现
-  if #titles > 0 then
+  if DOC_TITLE then
+    stat("大标题", DOC_TITLE .. "（取自文件名）")
+  elseif #titles > 0 then
     stat("大标题", titles[1])
   else
     stat("大标题", "没找到一级标题（#）—— 如果这篇有标题，请用 # 标出来")
@@ -883,7 +1389,9 @@ function Pandoc(doc)
     stat("表格", string.format("%d 个（转成三线表）", counts.tables))
   end
   if counts.images > 0 then
-    stat("图片", string.format("%d 张", counts.images))
+    local tail = (stats.image_captions > 0)
+      and string.format("，%d 张带题注", stats.image_captions) or ""
+    stat("图片", string.format("%d 张%s", counts.images, tail))
   end
 
   return out

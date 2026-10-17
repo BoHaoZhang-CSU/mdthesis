@@ -38,7 +38,7 @@ assert 'id=\"go\"' in h, '缺转换按钮'
 assert 'id=\"tplFile\"' in h, '缺自定义模板上传'
 # 右上角仓库入口 + 「继续添加 md 文件」提示（用户要求）
 assert 'github.com/BoHaoZhang-CSU/mdthesis' in h, '右上角缺仓库链接'
-assert '继续添加 md 文件' in h, '缺「继续添加 md 文件」提示（要提示是 md）'
+assert '继续添加 md' in h, '缺「继续添加 md」提示'
 # 页码提示：WPS 不会打开就更新域，必须让用户看到「按 F9」
 assert '页码按 F9 更新' in h, '缺「页码按 F9 更新」提示（WPS 不自动更新域）'
 assert '更新域' in h, '页码提示里没写清楚怎么做'
@@ -47,6 +47,7 @@ assert '更新整个目录' in h, '页码提示漏了 Word 会弹对话框这一
 assert h.find('id=\"list\"') < h.find('id=\"drop\"'), '添加区跑到文件列表上面去了'
 assert 'X-Report' in h, '前端没读自动修复报告'
 assert '识别结果' in h, '前端没有展示「识别结果」（读到了什么）'
+assert 'images' in h, '前端没有把图片一起上传'
 # 转换完成后要自动触发下载，不该让用户再点一次
 assert 'a.click()' in h, '没有自动下载逻辑'
 assert 'id=\"dlBtn\"' not in h, '还留着多余的下载按钮'
@@ -210,15 +211,18 @@ assert toc_para and 'pageBreakBefore' in toc_para.group(1), '目录没有独立�
 # 标题是中文，不是 pandoc 默认的 Table of Contents
 assert 'Table of Contents' not in d, '目录标题还是英文'
 # 域缓存里放的是**提示**（不是条目）：按 F9 后 Word/WPS 会把这段整体换成真目录。
-# 条目占位已废 —— 没人按 F9 时它看起来像目录、但页码全空，容易被直接交上去。
-seg = re.search(r'<w:fldChar w:fldCharType=' + Q + r'separate' + Q + r'\s*/></w:r></w:p>(.*?)'
-                r'<w:p><w:r><w:fldChar w:fldCharType=' + Q + r'end' + Q, d, re.S)
-cache = seg.group(1) if seg else ''
+# 提示现在放在**域开始段**里（TOC 指令 + separate + 提示）
+seg = re.search(r'<w:p[ >](?:(?!</w:p>).)*?TOC (?:(?!</w:p>).)*?</w:p>', d, re.S)
+cache = seg.group(0) if seg else ''
 assert 'F9' in cache, '目录缓存里没有 F9 提示'
 assert '<w:pStyle' not in cache, '目录缓存里还有条目（现在应该只放提示）'
 # 两条结构性要求 —— 实测不满足时渲染器会整块丢弃目录
 assert '<w:sdt>' not in d, '还套着 SDT 外壳（渲染器会忽略里面的内容）'
 assert re.search(r'</w:r><w:r><w:instrText', d), 'fldChar 没各自独立成 run'
+# 结束符必须在第一章标题段开头（没有独立末尾空段）—— WPS F9 后不会多出空白页
+endp = re.search(r'<w:p[ >](?:(?!</w:p>).)*?<w:fldChar w:fldCharType=' + Q + r'end' + Q + r'(?:(?!</w:p>).)*?</w:p>', d, re.S)
+h2 = sid('heading 2')
+assert endp and ('w:pStyle w:val=' + Q + h2 + Q in endp.group(0)) and ('F9' not in endp.group(0)), 'TOC 结束符没有放到第一章标题段'
 print('OK')" >/dev/null 2>&1
 check "目录域 + 中文标题 + F9 提示占位 + Word 标准结构" "$?"
 
@@ -362,7 +366,8 @@ for m in re.finditer(r'<w:style [^>]*w:styleId=\"([^\"]+)\"[^>]*>(.*?)</w:style>
     nm = re.search(r'<w:name w:val=\"([^\"]*)\"', m.group(2))
     names[m.group(1)] = nm.group(1) if nm else ''
 cnt = Counter(names.get(k, k) for k in re.findall(r'<w:pStyle w:val=\"([^\"]+)\"', d))
-assert cnt.get('heading 2', 0) == 7 and cnt.get('heading 3', 0) == 18, \
+# 参考文献现在用「不编号标题」（不再占章号），所以 chapter-level 标题 = heading 2 + 不编号标题
+assert cnt.get('heading 2', 0) + cnt.get('不编号标题', 0) == 7 and cnt.get('heading 3', 0) == 18, \
     f'章节样式没识别对：{dict(cnt)}'
 print('OK')" >/dev/null 2>&1
 check "自定义中文标题样式已按大纲级别识别（章 7 / 节 18）" "$?"
@@ -397,6 +402,216 @@ code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -X POST "$BASE/conve
   -F "file=@$HERE/论文1.md" -F "template=../../../etc/passwd")
 [ "$code" = "400" ] || [ "$code" = "404" ]
 check "被拒绝（HTTP $code）" "$?"
+
+# ── 图片：md 与图片分开上传（目录名任意）──
+echo "── POST /convert （md + 图片分开上传）"
+curl -sf --max-time 180 -X POST "$BASE/convert" \
+  -F "file=@$HERE/cases/T18_obsidian.md" \
+  -F "images=@$HERE/cases/figures/obs-1.png" \
+  -F "images=@$HERE/cases/figures/obs-2.png" \
+  -D "$TMP/himg2.txt" -o "$TMP/img2.docx"
+check "返回 200" "$?"
+n=$(py "
+import zipfile,re
+d=zipfile.ZipFile('$TMP/img2.docx').read('word/document.xml').decode()
+t=''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', d))
+print('%d|%d' % (d.count('<w:drawing>'), t.count('![[')))
+")
+[ "$n" = "2|0" ]; check "两张图都嵌进去了、无 ![[ 残留（实际 $n）" "$?"
+
+# ── zip：一个 md + 图片文件夹 ──
+echo "── POST /convert （zip：一个 md + figures）"
+py "
+import zipfile
+z=zipfile.ZipFile('$TMP/one.zip','w')
+z.write('$HERE/cases/T18_obsidian.md','doc.md')
+z.write('$HERE/cases/figures/obs-1.png','figures/obs-1.png')
+z.write('$HERE/cases/figures/obs-2.png','figures/obs-2.png')
+z.close()"
+curl -sf --max-time 180 -X POST "$BASE/convert" -F "file=@$TMP/one.zip" \
+  -D "$TMP/hzip1.txt" -o "$TMP/zip1.bin"
+check "返回 200" "$?"
+grep -qi '^content-type: *application/vnd' "$TMP/hzip1.txt"
+check "单个 md 直接返回 docx（不是 zip）" "$?"
+name=$(py "
+import base64,re
+h=open('$TMP/hzip1.txt',encoding='utf-8',errors='replace').read()
+m=re.search(r'(?im)^x-output-name:\s*(\S+)',h)
+print(base64.b64decode(m.group(1)).decode() if m else '')")
+[ "$name" = "doc.docx" ]; check "下载名用内层 md 的名字（实际 $name）" "$?"
+n=$(py "
+import zipfile
+d=zipfile.ZipFile('$TMP/zip1.bin').read('word/document.xml').decode()
+print(d.count('<w:drawing>'))")
+[ "$n" = "2" ]; check "zip 里的图片读到了（实际 $n）" "$?"
+
+# ── zip：多个 md → 每个一个 docx，打包返回 ──
+echo "── POST /convert （zip：多个 md）"
+py "
+import zipfile
+z=zipfile.ZipFile('$TMP/multi.zip','w')
+z.writestr('a.md', '# 甲\n\n## 一\n\n正文。\n')
+z.writestr('b.md', '# 乙\n\n## 一\n\n正文。\n')
+z.close()"
+curl -sf --max-time 180 -X POST "$BASE/convert" -F "file=@$TMP/multi.zip" \
+  -D "$TMP/hmulti.txt" -o "$TMP/multi.bin"
+check "返回 200" "$?"
+grep -qi '^content-type: *application/zip' "$TMP/hmulti.txt"
+check "多个 md 打包成 zip 返回" "$?"
+got=$(py "
+import zipfile,re,io
+z=zipfile.ZipFile('$TMP/multi.bin')
+names=sorted(z.namelist())
+titles=[]
+for n in names:
+    d=zipfile.ZipFile(io.BytesIO(z.read(n))).read('word/document.xml').decode()
+    ps=[p for p in re.findall(r'<w:p[ >].*?</w:p>', d, re.S) if 'w:pStyle w:val=\"84\"' in p]
+    titles.append(''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', ps[0])) if ps else '无')
+print('%s|%s' % (','.join(names), ','.join(titles)))")
+[ "$got" = "a.docx,b.docx|甲,乙" ]
+check "每个 md 一个 docx，md 自带 H1 时优先用 H1 当标题（实际 $got）" "$?"
+
+# ── zip：空 md 也出一个空 docx ──
+echo "── POST /convert （zip：空 md）"
+py "
+import zipfile
+z=zipfile.ZipFile('$TMP/empty.zip','w')
+z.writestr('empty.md','')
+z.close()"
+curl -sf --max-time 180 -X POST "$BASE/convert" -F "file=@$TMP/empty.zip" \
+  -o "$TMP/empty.docx"
+check "返回 200" "$?"
+got=$(py "
+import zipfile,re
+d=zipfile.ZipFile('$TMP/empty.docx').read('word/document.xml').decode()
+print('empty' if not ''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', d)).strip() else 'nonempty')")
+[ "$got" = "empty" ]; check "空 md 产出空 docx（实际 $got）" "$?"
+
+# ── zip：md 在子目录，图片用 ../figures 引用；非 md 文件忽略 ──
+echo "── POST /convert （zip：md 在子目录 + ../figures 引用）"
+py "
+import zipfile
+z=zipfile.ZipFile('$TMP/updir.zip','w')
+z.writestr('docs/report.md', '# 报告\n\n## 一\n\n![架构图](../figures/a.png)\n\n正文。\n')
+z.write('$HERE/cases/figures/obs-1.png','figures/a.png')
+z.writestr('docs/data.csv','a,b\n1,2\n')
+z.writestr('docs/meta.json','{\"x\":1}')
+z.close()"
+curl -sf --max-time 180 -X POST "$BASE/convert" -F "file=@$TMP/updir.zip" \
+  -o "$TMP/updir.docx"
+check "返回 200" "$?"
+got=$(py "
+import zipfile,re
+d=zipfile.ZipFile('$TMP/updir.docx').read('word/document.xml').decode()
+caps=[''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', p))
+      for p in re.findall(r'<w:p[ >].*?</w:p>', d, re.S)
+      if 'w:pStyle w:val=\"86\"' in p]
+print('%d|%s' % (d.count('<w:drawing>'), ','.join(caps)))")
+[ "$got" = "1|图1-1 架构图" ]
+check "../ 图片引用能解析、CSV/JSON 被忽略（实际 $got）" "$?"
+
+# ── 多文件包：每个 md 自己有一个 H1 时，用它当大标题（不要用文件名）──
+echo "── POST /convert （zip 多文件：md 自带 H1 标题）"
+py "
+import zipfile
+z=zipfile.ZipFile('$TMP/titles.zip','w')
+z.writestr('a.md','# 甲标题\\n\\n## 摘要\\n\\n摘要。\\n\\n## 1 引言\\n\\n正文。\\n\\n## 参考文献\\n\\n[1] x\\n')
+z.writestr('b.md','# 乙标题\\n\\n## 1 一\\n\\n正文。\\n')
+z.close()"
+curl -sf --max-time 180 -X POST "$BASE/convert" -F "file=@$TMP/titles.zip" \
+  -o "$TMP/titles.bin"
+check "返回 200" "$?"
+got=$(py "
+import zipfile,io,re
+z=zipfile.ZipFile('$TMP/titles.bin')
+def info(b):
+    zz=zipfile.ZipFile(io.BytesIO(b)); d=zz.read('word/document.xml').decode(); s=zz.read('word/styles.xml').decode()
+    nm={}
+    for m in re.finditer(r'<w:style [^>]*w:styleId=\"([^\"]+)\"[^>]*>(.*?)</w:style>', s, re.S):
+        x=re.search(r'<w:name w:val=\"([^\"]+)\"', m.group(2)); nm[m.group(1)]=x.group(1) if x else '?'
+    title='-'; ref='-'
+    for p in re.findall(r'<w:p[ >].*?</w:p>', d, re.S):
+        t=''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', p)).strip()
+        st=re.search(r'<w:pStyle w:val=\"([^\"]+)\"', p)
+        name=nm.get(st.group(1), '?') if st else '?'
+        if name == '摘要上标题' and title == '-': title = t
+        if t == '参考文献': ref = name
+    return title, ref
+out=[]
+for n in sorted(z.namelist()):
+    title, ref = info(z.read(n))
+    out.append('%s:%s:%s' % (n, title, ref))
+print(','.join(out))")
+[ "$got" = "a.docx:甲标题:不编号标题,b.docx:乙标题:-" ]
+check "自带 H1 的 md 用 H1 当大标题、参考文献不编号（实际 $got）" "$?"
+
+# ── 压缩包格式：tar.gz / 7z ──
+echo "── POST /convert （tar.gz 压缩包）"
+mkdir -p "$TMP/tarsrc/figures"
+printf '# 报告\n\n## 一\n\n![架构图](figures/a.png)\n' > "$TMP/tarsrc/report.md"
+cp "$HERE/cases/figures/obs-1.png" "$TMP/tarsrc/figures/a.png"
+tar czf "$TMP/pkg.tar.gz" -C "$TMP/tarsrc" .
+curl -sf --max-time 180 -X POST "$BASE/convert" -F "file=@$TMP/pkg.tar.gz" \
+  -o "$TMP/targz.docx"
+check "返回 200" "$?"
+got=$(py "
+import zipfile,re
+d=zipfile.ZipFile('$TMP/targz.docx').read('word/document.xml').decode()
+caps=[''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', p))
+      for p in re.findall(r'<w:p[ >].*?</w:p>', d, re.S)
+      if 'w:pStyle w:val=\"86\"' in p]
+print('%d|%s' % (d.count('<w:drawing>'), ','.join(caps)))")
+[ "$got" = "1|图1-1 架构图" ]
+check "tar.gz 里的 md+图片转换正常（实际 $got）" "$?"
+
+SZ=$(command -v 7z || command -v 7zz || true)
+if [ -n "$SZ" ]; then
+  echo "── POST /convert （7z 压缩包）"
+  (cd "$TMP/tarsrc" && "$SZ" a -t7z "$TMP/pkg.7z" report.md figures >/dev/null 2>&1)
+  curl -sf --max-time 180 -X POST "$BASE/convert" -F "file=@$TMP/pkg.7z" \
+    -o "$TMP/pkg7z.docx"
+  check "返回 200" "$?"
+  got=$(py "
+import zipfile
+d=zipfile.ZipFile('$TMP/pkg7z.docx').read('word/document.xml').decode()
+print(d.count('<w:drawing>'))")
+  [ "$got" = "1" ]; check "7z 里的图片转换正常（实际 $got）" "$?"
+
+  echo "── 安全：加密的 7z"
+  (cd "$TMP/tarsrc" && "$SZ" a -t7z -psecret "$TMP/enc.7z" report.md >/dev/null 2>&1)
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 -X POST "$BASE/convert" \
+    -F "file=@$TMP/enc.7z")
+  [ "$code" = "422" ]; check "加密压缩包被拒绝（HTTP $code）" "$?"
+else
+  echo "── 跳过 7z 测试（本机没有 7z/7zz）"
+fi
+
+# ── 安全：tar 路径穿越 / zip 路径穿越 / 非图片文件 ──
+echo "── 安全：tar 里带 ../ 路径"
+py "
+import tarfile,io
+with tarfile.open('$TMP/evil.tar.gz','w:gz') as tf:
+    data=b'# evil'
+    ti=tarfile.TarInfo('../evil.md'); ti.size=len(data)
+    tf.addfile(ti, io.BytesIO(data))"
+code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 -X POST "$BASE/convert" \
+  -F "file=@$TMP/evil.tar.gz")
+[ "$code" = "400" ]; check "被拒绝（HTTP $code）" "$?"
+echo "── 安全：zip 里带 ../ 路径"
+py "
+import zipfile
+z=zipfile.ZipFile('$TMP/evilzip.zip','w')
+z.writestr('../evil.md','# x\n')
+z.close()"
+code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 -X POST "$BASE/convert" \
+  -F "file=@$TMP/evilzip.zip")
+[ "$code" = "400" ]; check "被拒绝（HTTP $code）" "$?"
+
+echo "── 安全：把非图片文件当图片上传"
+printf 'not an image\n' > "$TMP/fake.png"
+code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 -X POST "$BASE/convert" \
+  -F "file=@$HERE/论文1.md" -F "images=@$TMP/fake.png")
+[ "$code" = "400" ]; check "被拒绝（HTTP $code）" "$?"
 
 echo
 printf '结果: %d 通过, %d 失败\n' "$pass" "$fail"

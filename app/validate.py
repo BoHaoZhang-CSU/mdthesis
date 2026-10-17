@@ -82,3 +82,116 @@ def check_docx_safety(path: Path) -> None:
 
     # 到这一步 zip 层面是干净的。样式层面的校验交给 prepare_template.py ——
     # 它找不到 heading 2 会以非零码退出并给出明确信息。
+
+
+# ---------- 图片上传 ----------
+
+# 只收 docx 塞得进去、pandoc/WPS 都能渲染的格式。svg 不行（需要 rsvg，
+# 而且 Word 不同版本支持不一），让用户导出 PNG。
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
+_EXT_BY_KIND = {"png": ".png", "jpg": ".jpg", "gif": ".gif", "bmp": ".bmp",
+                "webp": ".webp", "tiff": ".tif"}
+
+
+def _image_kind(data: bytes) -> str | None:
+    """按文件头认图片类型 —— 只看扩展名等于把任意文件当图片收。"""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "jpg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "gif"
+    if data.startswith(b"BM"):
+        return "bmp"
+    if len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "webp"
+    if data.startswith((b"II*\x00", b"MM\x00*")):
+        return "tiff"
+    return None
+
+
+def sanitize_upload_name(name: str) -> str:
+    """把上传文件名变成安全的纯文件名（不带任何路径）。"""
+    base = (name or "").replace("\\", "/").split("/")[-1]
+    base = "".join(c for c in base if c.isprintable() and c not in "\x00")
+    base = base.strip().strip(".")
+    if not base:
+        raise UploadError("上传的文件名无效")
+    if len(base) > 200:
+        stem, dot, ext = base.rpartition(".")
+        base = (stem[:190] + dot + ext) if dot else base[:200]
+    return base
+
+
+def check_image(name: str, data: bytes) -> str:
+    """校验一张图片，返回安全的文件名（扩展名按真实类型校正）。"""
+    safe = sanitize_upload_name(name)
+    if len(data) > config.MAX_IMAGE_BYTES:
+        raise UploadError(
+            f"图片过大：{safe}（{len(data) / 1048576:.1f} MB），"
+            f"单张上限 {config.MAX_IMAGE_BYTES / 1048576:.0f} MB",
+            status=413,
+        )
+    kind = _image_kind(data)
+    if kind is None:
+        raise UploadError(f"不是支持的图片格式：{safe}（支持 png/jpg/gif/bmp/webp/tif）")
+    ext = Path(safe).suffix.lower()
+    if ext not in IMAGE_EXTS:
+        raise UploadError(f"图片扩展名不支持：{safe}")
+    if ext not in (".jpg", ".jpeg") or kind != "jpg":
+        # 扩展名和真实类型对不上时以文件头为准 —— 否则 Word 里会渲染失败
+        safe = str(Path(safe).with_suffix(_EXT_BY_KIND[kind]))
+    return safe
+
+
+# ---------- zip 包（图片 + markdown） ----------
+
+def check_package(path: Path) -> list[zipfile.ZipInfo]:
+    """在解压前挡掉非法路径、zip bomb、超大包。"""
+    try:
+        zf = zipfile.ZipFile(path)
+    except zipfile.BadZipFile:
+        raise UploadError("压缩包不是有效的 zip")
+    except OSError as e:
+        raise UploadError(f"压缩包无法读取：{e}")
+
+    with zf:
+        infos = [i for i in zf.infolist() if not i.is_dir()]
+        if len(infos) > config.MAX_ZIP_ENTRIES:
+            raise UploadError(
+                f"压缩包条目过多：{len(infos)}，上限 {config.MAX_ZIP_ENTRIES}")
+        total = 0
+        for info in infos:
+            name = info.filename
+            parts = Path(name.replace("\\", "/")).parts
+            if name.startswith(("/", "\\")) or ".." in parts or (
+                    len(name) > 1 and name[1] == ":"):
+                raise UploadError(f"压缩包含非法路径条目：{name}")
+            total += info.file_size
+            if total > config.MAX_UNCOMPRESSED_BYTES:
+                raise UploadError(
+                    f"压缩包解压后过大，超过 {config.MAX_UNCOMPRESSED_BYTES / 1048576:.0f} MB")
+            if info.compress_size > 0 and info.file_size > 1048576:
+                ratio = info.file_size / info.compress_size
+                if ratio > config.MAX_COMPRESSION_RATIO:
+                    raise UploadError(
+                        f"条目压缩比异常（{ratio:.0f}:1），疑似 zip bomb：{name}")
+    return infos
+
+
+def extract_package(infos: list[zipfile.ZipInfo], src: Path, dest: Path) -> None:
+    """按原目录结构解压（路径已在 check_package 里校验过）。"""
+    with zipfile.ZipFile(src) as zf:
+        for info in infos:
+            name = info.filename.replace("\\", "/")
+            if name.startswith("__MACOSX/") or name.endswith("/.DS_Store") or name == ".DS_Store":
+                continue
+            target = dest / name
+            try:
+                target.resolve().relative_to(dest.resolve())
+            except ValueError:
+                raise UploadError(f"压缩包含非法路径条目：{info.filename}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info) as fh, open(target, "wb") as out:
+                while chunk := fh.read(1 << 20):
+                    out.write(chunk)

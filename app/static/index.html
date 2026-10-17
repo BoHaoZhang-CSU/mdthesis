@@ -150,10 +150,10 @@
     <!-- 添加区放在文件列表**下面**：已经加过文件之后，视觉重心是列表本身，
          添加入口退到下面（空态时列表不占位，这里就顶在最上面，和以前一样） -->
     <div id="drop">
-      <div class="big">拖拽 .md 文件到这里，可以一次拖多个</div>
-      <div class="small">也可以点击选择文件</div>
+      <div class="big">拖拽 .md 或压缩包到这里，可以一次拖多个</div>
+      <div class="small">压缩包支持 zip / rar / 7z / tar.gz 等 · 图片可以一起拖进来 · 也可以点击选择文件</div>
     </div>
-    <input type="file" id="mdFile" accept=".md,.markdown,.txt" multiple hidden>
+    <input type="file" id="mdFile" accept=".md,.markdown,.txt,.zip,.rar,.7z,.tar,.gz,.tgz,.bz2,.tbz2,.tb2,.xz,.txz,.zst,image/png,image/jpeg,image/gif,image/bmp,image/webp,image/tiff" multiple hidden>
 
     <div id="pasteBox">
       <a class="link" id="pasteToggle">▾ 或者直接粘贴 markdown 文本</a>
@@ -207,6 +207,16 @@ function isMd(f) {
          ((f.type === 'text/plain' || f.type === '') && f.size > 0 && f.size < 20 * 1024 * 1024);
 }
 
+function isArchive(f) {
+  return !!f && /\.(zip|rar|7z|tar|tar\.gz|tgz|tar\.bz2|tbz2|tb2|tar\.xz|txz|tar\.zst|zst|gz|bz2|xz)$/i.test(f.name || '');
+}
+
+function isImage(f) {
+  if (!f) return false;
+  if (/\.(png|jpe?g|gif|bmp|webp|tiff?)$/i.test(f.name || '')) return true;
+  return /^image\//i.test(f.type || '');
+}
+
 /* 同名文件自动加 (2)(3) 后缀 —— 用户经常会重复拖同一个文件，
    不加的话列表里分不清，下载下来的 docx 也会互相覆盖。 */
 function uniqueName(name) {
@@ -249,18 +259,33 @@ function addFiles(fileList, dt) {
     return;
   }
   const rejected = [];
+  const images = [];
   let n = 0;
   for (const f of files) {
-    if (!isMd(f)) { rejected.push(f.name || '(未命名)'); continue; }
-    queue.push({ id: ++seq, file: f, name: uniqueName(f.name),
+    if (isImage(f)) { images.push(f); continue; }
+    if (!isMd(f) && !isArchive(f)) { rejected.push(f.name || '(未命名)'); continue; }
+    queue.push({ id: ++seq, file: f, name: uniqueName(f.name), images: [],
                  addedAt: Date.now(), checked: true, done: false });
     n++;
+  }
+  // 图片跟着「最近添加的那个 md / zip」走 —— 一次拖一个 md + 一包图是最常见的用法
+  if (images.length) {
+    const host = queue.filter(q => !isArchive(q.file)).sort((a, b) => b.addedAt - a.addedAt)[0];
+    if (host) {
+      // 同名图片只留一张（后拖的覆盖前面的没意义，文件名就是 md 里的引用）
+      const have = new Set(host.images.map(x => x.name));
+      for (const im of images) if (!have.has(im.name)) { host.images.push(im); have.add(im.name); }
+      n++;
+    } else {
+      say('<div class="line err">图片要跟着 md / zip 一起转换 —— ' +
+          '请先添加 .md 或压缩包，再把图片拖进来。</div>');
+    }
   }
   if (n) { $('status').innerHTML = ''; render(); }
   // 被拒绝的一定要说出来 —— 静默跳过会让用户以为"拖进去没反应"
   if (rejected.length) {
-    say('<div class="line err">只支持 .md / .markdown / .txt，这几个没加进来：' +
-        rejected.map(esc).join('、') + '</div>');
+    say('<div class="line err">支持 .md / .markdown / .txt 和 zip/rar/7z/tar 等压缩包，图片可以一起拖；' +
+        '这几个没加进来：' + rejected.map(esc).join('、') + '</div>');
   }
 }
 
@@ -340,9 +365,9 @@ function render() {
   if (drop.dataset.mode !== String(compact)) {
     drop.dataset.mode = String(compact);
     drop.innerHTML = compact
-      ? '<div class="big">＋ 继续添加 md 文件（也可以拖到页面任意位置）</div>'
-      : '<div class="big">拖拽 .md 文件到这里，可以一次拖多个</div>' +
-        '<div class="small">也可以点击选择文件</div>';
+      ? '<div class="big">＋ 继续添加 md / zip（图片也可以一起拖）</div>'
+      : '<div class="big">拖拽 .md 或压缩包到这里，可以一次拖多个</div>' +
+        '<div class="small">图片可以一起拖进来（会跟着 md 走）· 也可以点击选择文件</div>';
   }
 
   listEl.innerHTML = queue.map(it =>
@@ -350,6 +375,8 @@ function render() {
       '<input type="checkbox" data-id="' + it.id + '"' +
              (it.checked ? ' checked' : '') + (running ? ' disabled' : '') + '>' +
       '<span class="name" title="' + esc(it.name) + '">' + esc(it.name) + '</span>' +
+      (it.images && it.images.length
+        ? '<span class="meta">' + it.images.length + ' 张图片</span>' : '') +
       '<span class="meta">' + ago(it.addedAt) + '</span>' +
       '<span class="x" data-del="' + it.id + '" title="移除">×</span>' +
     '</div>').join('');
@@ -413,6 +440,7 @@ function details(items) {
 async function convertOne(item) {
   const fd = new FormData();
   fd.append('file', item.file, item.name);
+  for (const img of (item.images || [])) fd.append('images', img, img.name);
   if (tplFile) fd.append('template_file', tplFile);
   else if (defaultTpl) fd.append('template', defaultTpl);
 
@@ -438,7 +466,20 @@ async function convertOne(item) {
   }
 
   const blob = await r.blob();
-  const name = (item.name.replace(/\.(md|markdown|txt)$/i, '') || 'output') + '.docx';
+  // 下载名以服务端为准：zip 里只有一个 md 时，文件名要用内层 md 的，
+  // 多个 md 时是「包名-docx.zip」，前端猜不出来。
+  let name = '';
+  const outHdr = r.headers.get('X-Output-Name');
+  if (outHdr) {
+    try {
+      name = new TextDecoder('utf-8').decode(
+        Uint8Array.from(atob(outHdr), c => c.charCodeAt(0)));
+    } catch (_) {}
+  }
+  if (!name) {
+    name = (item.name.replace(/\.(md|markdown|txt)$/i, '') || 'output') +
+           (isArchive(item.file) ? '-docx.zip' : '.docx');
+  }
   const url = download(blob, name);       // 已经点了转换，不再让他点第二次
   return { name, size: blob.size, url, rep };
 }
