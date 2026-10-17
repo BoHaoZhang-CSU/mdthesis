@@ -125,7 +125,7 @@ curl -sf --max-time 180 -X POST "$BASE/convert" \
 check "返回 200" "$?"
 head -c 2 "$TMP/out.docx" | grep -q "PK"; check "产物是 zip（docx）" "$?"
 py "
-import zipfile
+import re, zipfile
 z=zipfile.ZipFile('$TMP/out.docx')
 d=z.read('word/document.xml').decode()
 s=z.read('word/styles.xml').decode()
@@ -134,9 +134,13 @@ assert '摘要上标题' in s, '模板样式没带过来'
 assert 'pageBreakBefore' in s, '分页属性丢了'
 assert '<w:pict>' not in d, '出现空心横线'
 assert 'w:numId w:val=\"1\"' in s or 'numId w:val=\"1\"' in s, '自动编号定义丢了'
+# OPC：docx 包里不能有目录条目，也不能有指向目录的 Content_Types Override
+assert not any(i.is_dir() for i in z.infolist()), 'docx 含目录条目（Word 会拒开）'
+ct=z.read('[Content_Types].xml').decode()
+assert not re.search(r'<Override[^>]*PartName=\"[^\"]*/\"', ct), 'Content_Types 含目录 Override'
 print('OK')
 " >/dev/null 2>&1
-check "产物样式正确（摘要上标题 / 分页 / 无空心横线 / 编号）" "$?"
+check "产物样式正确（摘要上标题 / 分页 / 无空心横线 / 编号 / 无目录条目）" "$?"
 
 # 「识别结果」——用户要能一眼看出我们从他文档里读到了什么
 has=$(py "
