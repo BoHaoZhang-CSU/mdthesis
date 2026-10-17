@@ -24,6 +24,10 @@ Markdown → 毕业论文 Word（.docx）。版式（章节编号、分页、字
 **核心原则：你的正文一个字都不会被改。** 改的只是标题层级和分隔线这类排版信息，
 而且每一步都会告诉你改了什么。
 
+> 2026-10-17 这轮改动（图片/Obsidian、压缩包 zip/tar/7z/rar、代码块公式、
+> 列表去项目符号、不编号章节、WPS 目录空白页）的根因和做法，见
+> [`docs/踩坑与解决方案.md`](docs/踩坑与解决方案.md)。
+
 ## 三种用法
 
 **① 网页版**（给不写代码的人）
@@ -32,7 +36,8 @@ Markdown → 毕业论文 Word（.docx）。版式（章节编号、分页、字
 docker compose up -d --build      # 打开 http://127.0.0.1:8000
 ```
 
-拖入 `.md`，点一下，Word 直接下载。支持一次拖多个、模板上传、自动修复。
+拖入 `.md` 或压缩包（zip / tar / 7z / rar），点一下，Word 直接下载。
+支持一次拖多个、md + 图片、模板上传、自动修复。
 
 **② 命令行**
 
@@ -117,23 +122,26 @@ pandoc-web/
 │   ├── convert.py          调 tools/convert.sh + 自动修复
 │   ├── normalize.py        markdown 修复逻辑
 │   ├── validate.py         上传校验（zip 加固）
+│   ├── archive.py          压缩包解包（zip / tar / 7z / rar）
 │   ├── limits.py           并发闸门
 │   └── static/index.html   中文网页面板
 ├── deploy/
 │   └── docker-compose.yml  纯运行版 compose（给老 Docker 的目标机用）
 ├── docs/
-│   └── markdown-规范.md     书写规范 + 给 AI 的提示词
+│   ├── markdown-规范.md     书写规范 + 给 AI 的提示词
+│   └── 踩坑与解决方案.md     2026-10-17 这轮的根因与修法
 ├── filters/
 │   └── thesis_template.lua  模板适配逻辑（改行为改这里）
 ├── tools/
 │   ├── convert.sh           一键流程 ← CLI 主入口
 │   ├── prepare_template.py  从原始模板加工出 pandoc 专用模板
+│   ├── resolve_resources.py 图片路径 / Obsidian 嵌入解析
 │   └── strip_unused_media.py 剥离 pandoc 带入的无用图片（安全网）
 └── tests/
     ├── 论文1.md / .docx      主用例与产出
     ├── 论文1_预览.pdf        渲染预览（LibreOffice 转的，仅供参考）
-    ├── cases/               11 个刁钻边界用例
-    └── regression.sh        回归测试，49 项断言
+    ├── cases/               25 个刁钻边界用例
+    └── regression.sh        回归测试，118 项断言
 ```
 
 ---
@@ -200,10 +208,47 @@ docker compose up -d --build
 | GET | `/templates` | 列出内置模板 |
 | POST | `/check` | 只校验，返回告警 / 修复建议 / 猜测说明 |
 | POST | `/normalize` | 自动修复 markdown 并返回修好的内容 |
-| POST | `/convert` | 上传 md（+可选模板）→ 返回 docx |
+| POST | `/convert` | 上传 md 或压缩包（zip/tar/7z/rar，+可选图片 / 模板）→ 返回 docx 或 zip |
 
 告警通过响应头返回：`X-Warnings-Count`（条数）+ `X-Warnings`（base64 JSON，仅在较短时带上）。
 **全文告警请用 `/check`** —— 头部只放有界摘要，避免随用户输入无限膨胀。
+`X-Output-Name`（base64）是建议的下载名（zip 里单个 md 时用内层 md 的名字）。
+
+### 图片
+
+`/convert` 的 `file` 可以是 `.md`，也可以是包含 md+图片的压缩包
+（zip / tar / tar.gz / tar.bz2 / tar.xz / 7z / rar，按文件头识别，扩展名无所谓）；
+图片也可以用 `images` 字段单独传（可多张）。
+
+- 引用写 `![](figs/a.png)` 或 Obsidian 的 `![[figs/a.png]]` 都行；
+  **文件夹名不必一致** —— 会按文件名在整个包里找（`a.png` ↔ `figures/a.png`）。
+  md 在 `reports/`、图片在 `../figures/` 这种布局也支持。
+- 压缩包里只转 `.md` / `.markdown`，CSV / JSON / TXT 等一律忽略。
+- 加密压缩包不支持；压缩包里的符号链接会被拒绝；单文件 `.gz/.bz2/.xz` 需先打成 tar。
+- 7z/rar 解压依赖 `7z`/`7zz` 或 `bsdtar`（Dockerfile 已装 `7zip` + `libarchive-tools`）。
+  极少数使用特殊压缩方法的 RAR5 可能两个工具都解不了，建议改用 zip 重新打包。
+- md + 图片分开传：一个请求一个 md，图片跟着它走。
+- 压缩包：1 个 md → 返回 docx；多个 md → 每个一个 docx，打包成 zip 返回
+  （大标题取文件名，空 md 也出一个空 docx）。
+- 限额：单张 10 MB、一批 50 MB / 60 张、压缩包 60 MB（解压后 200 MB）。
+  只收 png/jpg/gif/bmp/webp/tif，按文件头校验，不是图片直接拒。
+
+### 代码块与行内代码
+
+- ` ```math ` / ` ```latex ` 代码块无条件当公式；` ```python ` / ` ```bash ` /
+  ` ```code ` 等语言标记永远是代码。
+- ` ```text ` / 无语言：像公式的行（有 `=`、无代码语法）转成 Word 公式并按章编号，
+  其余行转普通正文；像代码的块保持 Source Code。
+- 行内代码转普通文本（等宽字体对中文、路径、URL 不友好）；行内公式请用 `$…$`。
+- 这些判断通过 `X-Report` 的 `guesses` 汇报，误判时改语言标记即可。
+
+### 列表
+
+- 无序列表（`-` / `*`）转成正文段落，不使用 Word 项目符号：
+  一级项首行缩进 2 字；二级及以下左缩进 2 字符/级 +「（1）（2）」编号
+  （每个父项内重新计数）。这是学位论文/报告的通行规范（GB/T 7713.1）。
+- 有序列表（`1.` / `2.`）保持 Word 自动编号，不动。
+- 嵌套建议不超过 3 级。
 
 环境变量（都有保守默认值，部署机 6GB 内存就按默认走）：
 
@@ -380,8 +425,10 @@ pandoc 对图片引用**不做任何路径校验**。实测：
 
 - **摘要过长会留白**：若「大标题 + 摘要 + 关键词」超过一页，关键词会溢到第 2 页，
   而第 1 章强制另起一页 → 第 2 页大面积留白。属于内容长度问题，压缩摘要即可。
-- **相对路径图片依赖工作目录**：pandoc 解析 `![](figs/a.png)` 时以**子进程 cwd** 为基准。
-  服务端已经把 cwd 切到请求目录，但**用户上传的 md 里带的图片文件目前进不来** ——
-  接口只收单个 `.md`。要支持带图文档需要改成收 zip 包（尚未实现）。
+- **列表项里的图片不加题注**：只有独立成段的图片才会居中并生成题注
+  （`1. 说明\n    ![](a.png)` 这种写在列表项里的图只嵌入）。它们不是独立段落，
+  硬拆出列表会改变文档结构，所以暂不处理。
+- **图片按文件名匹配**：同名文件出现在两个目录时会报「重名，无法确定」并跳过 ——
+  把文件名改成唯一即可。
 - **加工后的模板自身** `document.xml` 里有指向已删图片的悬空引用 —— 无害，
   因为 pandoc 只用模板的 styles/settings，不用模板正文。

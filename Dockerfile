@@ -33,12 +33,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONIOENCODING=utf-8 \
     PYTHONDONTWRITEBYTECODE=1
 
+# 压缩包解压：7zz 解 7z，bsdtar（libarchive）解 rar。
+# Debian 主仓库的 7zip 不含 unRAR 代码（在 non-free），所以 rar 走 bsdtar。
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         python3 \
         python3-pip \
         tini \
+        7zip \
+        libarchive-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # pandoc：官方静态 arm64 二进制。静态链接 ⇒ 不依赖镜像里的 glibc，

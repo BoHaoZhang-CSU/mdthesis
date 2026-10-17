@@ -248,6 +248,148 @@ print('%d|%d|%d|%s' % (lit, inline, greek, ','.join(nums)))
       [ "$got" = "0|1|1|（1-1）,（1-2）" ]
       check "反斜杠公式变成真公式（无字面量残留 / 分式与希腊字母在 / 按章编号）（实际 $got）" "$?"
       ;;
+    T18_obsidian)
+      # Obsidian 的 ![[…]] 不是 markdown 图片：不处理的话 pandoc 当纯文本，
+      # 图片全部消失（真实样本里 31 张图一张都进不去）。
+      # 第二个引用只写文件名、实际文件在 figures/ 下 —— 同时验证「目录名任意」。
+      got=$(python3 -I -c "
+import zipfile,re
+d=zipfile.ZipFile('$out').read('word/document.xml').decode()
+t=''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', d))
+caps=[''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', p))
+      for p in re.findall(r'<w:p[ >].*?</w:p>', d, re.S)
+      if 'w:pStyle w:val=\"86\"' in p]
+imgp=d.count('w:pStyle w:val=\"46\"')
+print('%d|%d|%d|%s' % (d.count('<w:drawing>'), t.count('![['), imgp, ','.join(caps)))
+")
+      [ "$got" = "2|0|2|图1-1 obs-1,图2-1 obs-2" ]
+      check "Obsidian 嵌入变真图片、任意目录名能找回、套图片/图题样式（实际 $got）" "$?"
+      # 包内多文件模式：大标题取文件名，md 里的 H1 降为章节
+      (cd "$HERE/cases" && THESIS_DOC_TITLE="第一章 走进华为云" \
+          "$PROJ/tools/convert.sh" T18_obsidian.md "$OUTDIR/T18_title.docx" "$TPL") \
+          >/dev/null 2>&1
+      tt=$(python3 -I -c "
+import zipfile,re
+d=zipfile.ZipFile('$OUTDIR/T18_title.docx').read('word/document.xml').decode()
+ps=[p for p in re.findall(r'<w:p[ >].*?</w:p>', d, re.S) if 'w:pStyle w:val=\"84\"' in p]
+print(''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', ps[0])) if ps else '无')
+")
+      [ "$tt" = "第一章 走进华为云" ]
+      check "包内多文件：大标题取自文件名（实际 $tt）" "$?"
+      ;;
+    T19_image_caption)
+      # 题注优先级：图下加粗行 > alt > 文件名；行内图完全不动；
+      # 有加粗行时不能再出 pandoc 的 Image Caption（双题注，踩过）。
+      got=$(python3 -I -c "
+import zipfile,re
+d=zipfile.ZipFile('$out').read('word/document.xml').decode()
+caps=[''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', p))
+      for p in re.findall(r'<w:p[ >].*?</w:p>', d, re.S)
+      if 'w:pStyle w:val=\"86\"' in p]
+print('%d|%d|%s' % (d.count('<w:drawing>'), d.count('Image Caption'), ','.join(caps)))
+")
+      [ "$got" = "5|0|图1-1 系统架构,图2-1 test_img,图2-2 alt 文字,图2-3 加粗题注" ]
+      check "题注来源优先级正确、无双题注、行内图不动（实际 $got）" "$?"
+      ;;
+    T21_obsidian_alias)
+      # Obsidian 别名：纯数字/百分比 = 宽度，其余 = 题注文字
+      got=$(python3 -I -c "
+import zipfile,re
+d=zipfile.ZipFile('$out').read('word/document.xml').decode()
+w=[round(int(x)/914400,2) for x in re.findall(r'<wp:extent cx=\"(\d+)\"', d)]
+caps=[''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', p))
+      for p in re.findall(r'<w:p[ >].*?</w:p>', d, re.S)
+      if 'w:pStyle w:val=\"86\"' in p]
+print('%s|%s' % (w, ','.join(caps)))
+")
+      [ "$got" = "[2.5, 1.67, 1.67]|图1-1 obs-1,图1-2 云服务器架构,图1-3 obs-1" ]
+      check "Obsidian 别名：宽度/题注分别生效（实际 $got）" "$?"
+      ;;
+    T22_false_caption)
+      # 真实样本踩到：「**图表解读：…**」被当成图题，拆成「图 + 表解读：…」。
+      # 题注前缀后面必须跟数字/空白/冒号，否则是正文小标题。
+      got=$(python3 -I -c "
+import zipfile,re
+d=zipfile.ZipFile('$out').read('word/document.xml').decode()
+caps=[''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', p))
+      for p in re.findall(r'<w:p[ >].*?</w:p>', d, re.S)
+      if 'w:pStyle w:val=\"86\"' in p]
+t=''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', d))
+print('%s|%d' % (','.join(caps), 1 if '图表解读：这不是题注' in t else 0))
+")
+      [ "$got" = "图1-1 原始数据分布|1" ]
+      check "「图表解读」不被误判成图题（实际 $got）" "$?"
+      ;;
+    T23_code_formula)
+      # 用户要求：```text 里的公式转成真公式（按章编号）；真代码（python）不动；
+      # 非公式的 text 块转普通正文；行内代码转普通文本（不再用 Fira Code）。
+      got=$(python3 -I -c "
+import zipfile,re
+d=zipfile.ZipFile('$out').read('word/document.xml').decode()
+t=''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', d))
+nums=[]
+for tb in re.findall(r'<w:tbl>.*?</w:tbl>', d, re.S):
+    if 'm:oMathPara' in tb:
+        nums.append(''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', tb)).replace(chr(0x200b),'').strip())
+ok = 1 if ('video.mp4' in t and 'read_csv()' in t and 'ddof=0' in t) else 0
+print('%d|%d|%d|%s|%d' % (d.count('<m:oMath>'), d.count('w:pStyle w:val=\"41\"'),
+      d.count('w:rStyle w:val=\"40\"'), ','.join(nums), ok))
+")
+      [ "$got" = "2|1|0|（1-1）,（1-2）|1" ]
+      check "代码块公式化 / 真代码保留 / 行内代码转普通文本（实际 $got）" "$?"
+      ;;
+    T24_lists)
+      # 用户要求：无序列表去符号转正文（一级首行缩进两字）；
+      # 嵌套项按层级缩进 +（1）（2）编号；有序列表保持自动编号。
+      got=$(python3 -I -c "
+import zipfile,re
+d=zipfile.ZipFile('$out').read('word/document.xml').decode()
+t=''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', d))
+paras=re.findall(r'<w:p[ >].*?</w:p>', d, re.S)
+def txt(p): return ''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', p))
+unord=[p for p in paras if any(x in txt(p) for x in ('第一点内容','第二点内容','第三点内容','嵌套的一点','嵌套的第二点','更深一层'))]
+with_num=sum(1 for p in unord if '<w:numPr>' in p)
+s2=d.count('w:pStyle w:val=\"列表正文二级\"')
+s3=d.count('w:pStyle w:val=\"列表正文三级\"')
+pref=1 if ('（1）嵌套的一点' in t and '（2）嵌套的第二点' in t and '（1）更深一层' in t) else 0
+print('%d|%d|%d|%d' % (with_num, s2, s3, pref))
+")
+      [ "$got" = "0|2|1|1" ]
+      check "无序列表转正文、嵌套缩进编号、有序列表保留编号（实际 $got）" "$?"
+      ;;
+    T25_unnumbered)
+      # 用户要求：摘要/目录/参考文献/致谢/附录不占章号。
+      # 参考文献/致谢/附录套「不编号标题」样式，摘要用「摘要」样式。
+      got=$(python3 -I -c "
+import zipfile,re
+z=zipfile.ZipFile('$out')
+d=z.read('word/document.xml').decode(); s=z.read('word/styles.xml').decode()
+nm={}
+for m in re.finditer(r'<w:style [^>]*w:styleId=\"([^\"]+)\"[^>]*>(.*?)</w:style>', s, re.S):
+    x=re.search(r'<w:name w:val=\"([^\"]+)\"', m.group(2)); nm[m.group(1)]=x.group(1) if x else '?'
+def style_of(text):
+    for p in re.findall(r'<w:p[ >].*?</w:p>', d, re.S):
+        t=''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', p)).strip()
+        if t == text:
+            st=re.search(r'<w:pStyle w:val=\"([^\"]+)\"', p)
+            return nm.get(st.group(1), '?') if st else '?'
+    return '缺'
+print('%s|%s|%s|%s' % (style_of('摘要'), style_of('参考文献'), style_of('致谢'), style_of('附录A 补充数据')))
+")
+      [ "$got" = "摘要|不编号标题|不编号标题|不编号标题" ]
+      check "摘要/参考文献/致谢/附录使用不编号样式（实际 $got）" "$?"
+      ;;
+    T20_empty)
+      # 用户明确要求：包里的空 md 也出一个空 docx，而不是跳过
+      got=$(python3 -I -c "
+import zipfile,re
+d=zipfile.ZipFile('$out').read('word/document.xml').decode()
+t=''.join(re.findall(r'<w:t[^>]*>([^<]*)</w:t>', d)).strip()
+print('empty' if not t else 'nonempty')
+")
+      [ "$got" = "empty" ]
+      check "空 md 产出空 docx（实际 $got）" "$?"
+      ;;
     T12_bare_numbering)
       # 手写的裸数字编号（## 3 递推…）必须被剥掉
       has=$(python3 -I -c "
@@ -314,7 +456,13 @@ out="$OUTDIR/论文1.docx"
 
 # 目录条目不再由我们写进缓存（改成 F9 提示占位），所以这份基线里**没有 toc 1 / toc 2** ——
 # 那两种样式是 Word/WPS 更新域时才生成的。其余每一项都必须和以前逐字相同。
-expect='Compact:51 Body Text:26 First Paragraph:22 heading 3:18 heading 2:7 摘要上标题:1 摘要:1 目录两个字:1 Block Text:1'
+# 2026-10-17：无序列表转正文（用户要求）。这里只有那 3 个 bullet 项有差异：
+#   3 个 Compact → Body Text；列表后紧跟的「原稿中……」由 First Paragraph → Body Text
+#   （列表变成普通段落后，它不再是「新块的第一段」）。其余 9 个样式一字未变。
+# 2026-10-17（第二次）：参考文献改成「不编号标题」样式（用户要求不占章号）。
+#   heading 2 -1（参考文献）、不编号标题 +1；
+#   参考文献后紧跟的段落由 First Paragraph → Body Text（它不再算「标题后的第一段」）。
+expect='Compact:48 Body Text:31 First Paragraph:20 heading 3:18 heading 2:6 摘要上标题:1 摘要:1 目录两个字:1 不编号标题:1 Block Text:1'
 got=$(python3 -I -c "
 import zipfile,re
 from collections import Counter
@@ -334,13 +482,29 @@ print(' '.join(f'{nm.get(k,k)}:{v}' for k,v in c.most_common()))
 toc=$(python3 -I -c "
 import re, zipfile
 d=zipfile.ZipFile('$out').read('word/document.xml').decode()
-m=re.search(r'<w:fldChar w:fldCharType=\"separate\"\s*/></w:r></w:p>(.*?)<w:p><w:r><w:fldChar w:fldCharType=\"end\"', d, re.S)
-seg=m.group(1) if m else ''
-styled=len(re.findall(r'<w:pStyle', seg))    # 占位提示段没有 pStyle；有条目就会有
+# F9 提示现在放在**域开始段**里（TOC 指令 + separate + 提示）；没有 pStyle 说明缓存不是条目
+m=re.search(r'<w:p[ >](?:(?!</w:p>).)*?TOC (?:(?!</w:p>).)*?</w:p>', d, re.S)
+seg=m.group(0) if m else ''
+styled=len(re.findall(r'<w:pStyle', seg))
 ok=(styled==0) and ('F9' in seg)
 print('OK' if ok else '坏 styled=%d F9=%s' % (styled, 'F9' in seg))
 ")
 [ "$toc" = "OK" ]; check "目录缓存是 F9 提示、没有条目（实际 $toc）" "$?"
+
+# 结束符必须在第一章标题段开头（没有独立的末尾空段）—— 用户实测这个结构
+# 在 WPS 里 F9 后不产生空白页（2026-10-17）。
+endpt=$(python3 -I -c "
+import re,zipfile
+d=zipfile.ZipFile('$out').read('word/document.xml').decode()
+s=zipfile.ZipFile('$out').read('word/styles.xml').decode()
+mh=re.search(r'<w:style [^>]*w:styleId=\"([^\"]+)\"[^>]*>\s*<w:name w:val=\"heading 2\"\s*/>', s, re.S)
+h2=mh.group(1) if mh else '5'
+m=re.search(r'<w:p[ >](?:(?!</w:p>).)*?<w:fldChar w:fldCharType=\"end\"\s*/>(?:(?!</w:p>).)*?</w:p>', d, re.S)
+p=m.group(0) if m else ''
+ok=('w:pStyle w:val=\"%s\"' % h2 in p) and ('F9' not in p) and ('F9' in d)
+print('OK' if ok else '坏 h2=%s F9inP=%s' % (h2, 'F9' in p))
+")
+[ "$endpt" = "OK" ]; check "目录域结束符在第一章标题段开头、没有独立空段（实际 $endpt）" "$?"
 
 # 页边批注方案已撤（正文里写提示就够，批注是否显示还取决于 WPS 设置）。
 # 这里留着防回归：**不许**再往 docx 里塞同名重复部件（pandoc 本来就有 comments.xml，
@@ -368,7 +532,9 @@ for m in re.finditer(r'<w:style [^>]*w:styleId=\"([^\"]+)\"[^>]*>(.*?)</w:style>
 bad=set()
 for sid in set(re.findall(r'<w:pStyle w:val=\"([^\"]+)\"', d)):
     nm, l = lvl.get(sid, ('', 99))
-    if l <= 2 and nm and not nm.startswith('heading'): bad.add(nm)
+    # 不编号标题故意保留大纲级别（参考文献/致谢/附录要进目录，只是不带章号）
+    if l <= 2 and nm and not nm.startswith('heading') and nm != '不编号标题':
+        bad.add(nm)
 print(','.join(sorted(bad)) or '无')
 ")
 [ "$stray" = "无" ]; check "没有非章节样式会混进目录（实际 $stray）" "$?"

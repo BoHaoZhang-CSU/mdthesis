@@ -236,10 +236,11 @@ def relocate_toc(doc_xml, ids, stats):
     if not title_id or not h2_id:
         return doc_xml
 
-    # 目录块 = 「目录」标题段 → 目录域结束段
+    # 目录块 = 「目录」标题段 → 目录域结束段。
+    # 结束段现在带 pPr/rPr（1pt，防空白页），不能再写死成 <w:p><w:r>…</w:r></w:p>。
     m = re.search(
         r'<w:p><w:pPr><w:pStyle w:val="%s"\s*/></w:pPr>(?:(?!</w:p>).)*?目录.*?</w:p>'
-        r'.*?<w:p><w:r><w:fldChar w:fldCharType="end"\s*/></w:r></w:p>'
+        r'.*?<w:p>(?:(?!</w:p>).)*?<w:fldChar w:fldCharType="end"\s*/>(?:(?!</w:p>).)*?</w:p>'
         % re.escape(title_id),
         doc_xml,
         re.S,
@@ -271,6 +272,63 @@ def relocate_toc(doc_xml, ids, stats):
 
     stats["relocated"] = True
     return rest[:m2.start()] + block + rest[m2.start():]
+
+
+def move_end_into_heading(doc_xml, ids):
+    """把目录域结束符从 F9 提示段挪到第一章标题段开头，并删掉提示段。
+
+    为什么（2026-10-17 用户实测）：
+    WPS 按 F9 更新目录后，会在域结果末尾保留一个空段落（只放 fldChar end）。
+    目录刚好填满一页时，这个空段会被挤到下一页；第一章又带「段前分页」，
+    于是目录和第一章之间多出一页空白。把结束符放进**第一章标题段落开头**后，
+    域结果后面直接就是第一章，WPS 没有位置再补空段 —— 用户实测这个结构
+    能正常生成目录/页码，章也照常另起一页，没有空白页。
+    """
+    h2 = ids.get("heading 2")
+    if not h2:
+        return doc_xml
+    paras = list(re.finditer(r"<w:p\b.*?</w:p>", doc_xml, re.S))
+    begin = ph = head = None
+    for m in paras:
+        p = m.group(0)
+        if begin is None and "TOC \\o" in p and 'fldCharType="separate"' in p:
+            begin = m
+        if begin is not None and ph is None and TOC_PLACEHOLDER in p:
+            ph = m
+        if ph is not None and m.start() > ph.start() and re.search(
+                r'<w:pStyle w:val="%s"\s*/>' % re.escape(h2), p):
+            head = m
+            break
+    if not (begin and ph and head):
+        return doc_xml
+
+    ph_xml = ph.group(0)
+    hint = re.search(r'<w:r><w:rPr><w:color w:val="808080"/></w:rPr>'
+                     r'<w:t[^>]*>.*?</w:t></w:r>', ph_xml, re.S)
+    end = re.search(r'<w:r>(?:(?!</w:r>).)*?<w:fldChar w:fldCharType="end"\s*/>'
+                    r'(?:(?!</w:r>).)*?</w:r>', ph_xml, re.S)
+    if not hint or not end:
+        return doc_xml
+
+    # 提示文字挪到域开始段（F9 时被目录条目替换）；结束符挪到第一章标题段开头
+    b = begin.group(0)
+    new_begin = b[:b.rfind("</w:p>")] + hint.group(0) + "</w:p>"
+    h = head.group(0)
+    ppr = re.search(r"<w:pPr>.*?</w:pPr>", h, re.S)
+    if ppr:
+        new_head = h[:ppr.end()] + end.group(0) + h[ppr.end():]
+    else:
+        open_end = h.find(">") + 1
+        new_head = h[:open_end] + end.group(0) + h[open_end:]
+
+    edits = [
+        (head.start(), head.end(), new_head),
+        (begin.start(), begin.end(), new_begin),
+        (ph.start(), ph.end(), ""),
+    ]
+    for start, stop, text in sorted(edits, reverse=True):
+        doc_xml = doc_xml[:start] + text + doc_xml[stop:]
+    return doc_xml
 
 
 def enable_update_fields(settings_xml):
@@ -316,11 +374,33 @@ def note_stat(label, msg):
 # （先前还试过在「目录」上挂页边批注，已撤 —— 正文里写就够了，批注是否显示还取决于设置。）
 TOC_PLACEHOLDER = "（在这段文字上点一下，按 F9 → 目录和页码就生成好了）"
 
+# 目录域结束符。
+#
+# ⚠️ 2026-10-17 第二次修（1pt 方案在 WPS 里没生效）：
+# WPS 的目录后面会保留一个**只放 fldChar end 的独立空段落**。目录刚好填满整页时，
+# 这个空段落被挤到下一页；第 1 章又带「段前分页」→ 中间多一页空白。
+# 之前把这段压成 1pt，LibreOffice 有效，但 WPS 更新域后仍按整行高排版，问题依旧。
+#
+# 现在改成：**不产生独立空段落**，把 end 符直接放进域结果（占位提示段）的末尾。
+# F9 更新后 end 符会跟着最后一条目录走（Word 原生 TOC 就是这个结构），
+# 即便目录刚好填满一页，也没有多余段落可被挤到下一页。
+# 结束符 run 也设成隐藏 + 1pt —— F9 后它通常只和段落标记一起留在末尾。
+TOC_END_RUN = ('<w:r><w:rPr><w:vanish/><w:sz w:val="2"/><w:szCs w:val="2"/></w:rPr>'
+               '<w:fldChar w:fldCharType="end"/></w:r>')
+
 
 def build_toc_placeholder():
-    """占位提示段：居中 + 灰字（一眼能看出是"还没生成"的东西）。"""
+    """占位提示段：居中 + 灰字（一眼能看出是"还没生成"的东西）。
+
+    ⚠️ 段落标记额外设成**隐藏 + 1pt**：F9 更新目录后，WPS 会把这一段留下来
+    当作目录域的结束段（实测它连 jc/color 都保留，所以 vanish/sz 也会保留）。
+    隐藏 + 1pt 让这个空段落在排版时不占行高 —— 否则长目录刚好填满一页时，
+    它会被挤到下一页；第 1 章又带「段前分页」，于是多出一页空白（用户 2026-10-17 报）。
+    """
     grey = '<w:rPr><w:color w:val="808080"/></w:rPr>'
-    return ('<w:p><w:pPr><w:jc w:val="center"/>' + grey + "</w:pPr>"
+    mark = ('<w:rPr><w:color w:val="808080"/><w:vanish/>'
+            '<w:sz w:val="2"/><w:szCs w:val="2"/></w:rPr>')
+    return ('<w:p><w:pPr><w:jc w:val="center"/>' + mark + "</w:pPr>"
             '<w:r>' + grey + '<w:t xml:space="preserve">' + TOC_PLACEHOLDER
             + "</w:t></w:r></w:p>")
 
@@ -355,6 +435,8 @@ def main():
     # 想改回"缓存里放条目"：把这行换成 build_toc_xml(entries, ids, tab_pos) 即可
     # （那是今天早些时候的做法，函数和章号逻辑都还留着）。
     toc_xml = build_toc_placeholder()
+    # end 符放进占位段末尾：不再单独产生一个空段落（空白页的根因）
+    toc_xml = toc_xml.replace("</w:p>", TOC_END_RUN + "</w:p>", 1)
 
     # 把 pandoc 的目录域**重建成 Word 的标准结构**。
     #
@@ -365,8 +447,7 @@ def main():
     # 而 Word / 原论文里是这样（**每个 fldChar 各自一个 run**，条目是独立段落）：
     #   <w:p><w:r><w:fldChar begin/></w:r><w:r><w:instrText>TOC…</w:instrText></w:r>
     #        <w:r><w:fldChar separate/></w:r></w:p>
-    #   <w:p>…条目…</w:p>
-    #   <w:p><w:r><w:fldChar end/></w:r></w:p>
+    #   <w:p>…条目…<w:fldChar end/></w:p>     ← end 跟最后一条目录同段（不另起空段）
     #
     # 另外 pandoc 会套一层 <w:sdt>，而原论文的目录没有 —— 一并去掉。
     # 这两处结构差异都会让部分渲染器（实测 LibreOffice）整块忽略目录内容。
@@ -387,7 +468,6 @@ def main():
             + '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
             + "</w:p>"
             + toc_xml
-            + '<w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
         )
         new_doc = doc[:m.start()] + rebuilt + doc[m.end():]
 
@@ -400,6 +480,7 @@ def main():
     stats = {}
     new_doc = fix_title_style(new_doc, ids, stats, tpl_path)
     new_doc = relocate_toc(new_doc, ids, stats)
+    new_doc = move_end_into_heading(new_doc, ids)
 
     new_settings = None
     if "word/settings.xml" in zin.namelist():

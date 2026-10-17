@@ -26,9 +26,10 @@ TPL="${3:-${THESIS_TEMPLATE:-$ROOT/assets/templates/毕业论文通用模板.doc
 
 FILTER="$ROOT/filters/thesis_template.lua"
 STRIP="$HERE/strip_unused_media.py"
+RESOLVE="$HERE/resolve_resources.py"
 
 [ -f "$IN" ] || { echo "找不到输入文件：$IN" >&2; exit 1; }
-for f in "$FILTER" "$STRIP"; do
+for f in "$FILTER" "$STRIP" "$RESOLVE"; do
   [ -f "$f" ] || { echo "项目文件缺失：$f（仓库不完整？）" >&2; exit 1; }
 done
 
@@ -63,8 +64,12 @@ trap 'rm -rf "$tmpdir"' EXIT
 
 # 目录：标题够多才生成。太少的话目录只有一行「目录」，纯属噪音。
 # （--toc 由 pandoc 生成真正的 Word 目录域，标题用模板的 TOC 标题样式）
+# ⚠️ grep -c 在「0 个匹配」时退出码是 1 —— 以前写成 `|| echo 0`，于是空文件
+#    会得到 "0\n0" 两个值，`[ ... -ge 3 ]` 报 “0: integer expected”。
 TOC_OPTS=()
-if [ "$(grep -c -E '^#{1,3}[ \t]' "$IN" 2>/dev/null || echo 0)" -ge 3 ]; then
+n_head=$(grep -c -E '^#{1,3}[ \t]' "$IN" 2>/dev/null || true)
+[ -n "$n_head" ] || n_head=0
+if [ "$n_head" -ge 3 ]; then
   TOC_OPTS=(--toc --toc-depth=3 -M toc-title=目录)
 fi
 
@@ -75,6 +80,20 @@ if [ -f "$TPL.map.json" ]; then
   export THESIS_STYLE_MAP="$(cat "$TPL.map.json")"
 fi
 
+# 0. 图片解析：Obsidian 的 ![[…]] → 标准图片；文件夹名不一致时按文件名找回。
+#    改写只进临时副本，用户的原 md 一个字不动。
+#
+#    搜索范围：服务端通过 THESIS_RESOURCE_ROOTS 指定（zip 解压根目录，
+#    这样 md 在 reports/ 里引用 ../figures/x.png 也能找到）。
+#    命令行没设时用「当前目录 + md 所在目录 + 它的上一级」——
+#    报告放在子目录、图片放在兄弟目录是很常见的布局。
+if [ -n "${THESIS_RESOURCE_ROOTS:-}" ]; then
+  IFS=':' read -r -a RES_ROOT_LIST <<< "$THESIS_RESOURCE_ROOTS"
+else
+  RES_ROOT_LIST=("$PWD" "$(dirname "$IN")" "$(dirname "$(dirname "$IN")")")
+fi
+python3 -I "$RESOLVE" "$IN" "$tmpdir/resolved.md" "${RES_ROOT_LIST[@]}" >/dev/null
+
 # 1. 转换（内容不动，样式交给模板 + filter）
 #    -f markdown-raw_attribute：禁用 `{=openxml}` 原始属性语法。
 #    用户能用它往 document.xml 里塞任意 OOXML，构造出"别人打开文档时才触发"的引用。
@@ -83,7 +102,8 @@ fi
 #    转义括号解析成字面量 `(x^2)`，`\[ ... \]` 里的 `\frac{}{}` 变成 RawInline(tex) 被
 #    docx writer **静默丢弃** —— 公式塌成 `[ E_c= ]` 这种残骸，退出码 0、零告警。
 #    AI 生成的 md 普遍用 `\( \)` / `\[ \]`，必须开。
-pandoc "$IN" -f markdown-raw_attribute+tex_math_single_backslash -o "$tmpdir/raw.docx" \
+pandoc "$tmpdir/resolved.md" -f markdown-raw_attribute+tex_math_single_backslash \
+  -o "$tmpdir/raw.docx" \
   --reference-doc="$TPL" \
   --lua-filter="$FILTER" \
   "${TOC_OPTS[@]}"

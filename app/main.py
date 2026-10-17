@@ -7,12 +7,13 @@
 """
 import base64
 import json
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
-from . import config, convert, normalize
+from . import archive, config, convert, normalize
 from .limits import Busy, limiter
 from .ratelimit import limiter as rate_limiter
 from .validate import UploadError, check_docx_safety, check_md_size
@@ -104,6 +105,9 @@ def _result_headers(result: convert.ConvertResult) -> dict:
         "X-Changes-Count": str(len(result.changes)),
         "X-Guesses-Count": str(len(result.guesses)),
         "X-Stats-Count": str(len(result.stats)),
+        # 下载名（zip 里单个 md 时是内层 md 的名字，不是包名）
+        "X-Output-Name": base64.b64encode(
+            result.output_name.encode("utf-8")).decode("ascii"),
     }
     if result.warnings or result.changes or result.guesses or result.stats:
         blob = _b64({
@@ -206,13 +210,20 @@ async def normalize_md(request: Request, file: UploadFile = File(..., descriptio
 
 
 @app.post("/convert", summary="转换并下载 Word（自动修复格式）",
-          description="上传 markdown，**服务会先把格式问题自动修好，再转换**，直接返回排好版的 .docx。\n\n"
+          description="上传 markdown（或包含 md+图片的压缩包：zip / tar 系 / 7z / rar），"
+                      "**服务会先把格式问题自动修好，再转换**，直接返回排好版的 .docx。\n\n"
+                      "图片可以用 `images` 字段单独传；压缩包里有多个 md 时，"
+                      "每个 md 转成一个 docx，打包成 zip 返回。\n\n"
                       "用户不需要「拿回去改完再传一遍」。修了什么、哪里是猜的，"
                       "通过响应头 `X-Report`（base64 JSON，含 `changes` / `guesses` / `warnings`）回报。\n\n"
                       "若不想要自动修复，传 `auto_fix=false`。")
 async def convert_md(
     request: Request,
-    file: UploadFile = File(..., description="要转换的 markdown 文件"),
+    file: UploadFile = File(
+        ..., description="要转换的 markdown 文件，或包含 md+图片的压缩包"
+                         "（zip / tar / tar.gz / tar.bz2 / tar.xz / 7z / rar）"),
+    images: list[UploadFile] | None = File(
+        None, description="图片，可多张。文件名要与 md 里的引用一致（文件夹名可以不同）"),
     template: str | None = Form(None, description="内置模板名（见「列出可用模板」），不填用默认模板"),
     template_file: UploadFile | None = File(
         None, description="自定义模板 docx。填了就用它，忽略上面的内置模板名"
@@ -220,8 +231,20 @@ async def convert_md(
 ):
     """转换成 docx。自动修复 + 告警通过 X-Report 响应头返回（base64 JSON）。"""
     _check_rate(request)
-    md = await _read_upload(file, config.MAX_MD_BYTES, "markdown 文件")
-    check_md_size(md)
+    fname = file.filename or "input.md"
+    raw = await _read_upload(
+        file, max(config.MAX_MD_BYTES, config.MAX_PACKAGE_BYTES), "文件")
+    # 按文件头判断，不看扩展名（用户会把 zip 改名成 .数据，也会把 rar 当 zip 传）
+    is_package = archive.is_archive(raw)
+    if not is_package:
+        check_md_size(raw)
+
+    img_list: list[tuple[str, bytes]] = []
+    for up in (images or []):
+        if not up.filename:
+            continue
+        img_list.append((up.filename,
+                         await _read_upload(up, config.MAX_IMAGE_BYTES, "图片")))
 
     uploaded: bytes | None = None
     if template_file is not None and template_file.filename:
@@ -243,12 +266,24 @@ async def convert_md(
 
     try:
         with limiter.slot():
-            result = await run_in_threadpool(
-                convert.run_convert, md, tpl_path, uploaded
-            )
+            if is_package:
+                result = await run_in_threadpool(
+                    convert.run_convert_package, raw, tpl_path, uploaded,
+                    name_hint=fname,
+                )
+            else:
+                result = await run_in_threadpool(
+                    convert.run_convert, raw, tpl_path, uploaded,
+                    images=img_list, name_hint=fname,
+                )
     except Busy:
         raise HTTPException(status_code=503, detail="服务繁忙，请稍后重试")
 
     headers = _result_headers(result)
-    headers["Content-Disposition"] = 'attachment; filename="output.docx"'
-    return Response(content=result.docx, media_type=DOCX_MIME, headers=headers)
+    fallback = "output.zip" if result.is_zip else "output.docx"
+    headers["Content-Disposition"] = (
+        f'attachment; filename="{fallback}"; '
+        f"filename*=UTF-8''{quote(result.output_name)}"
+    )
+    media = "application/zip" if result.is_zip else DOCX_MIME
+    return Response(content=result.docx, media_type=media, headers=headers)
