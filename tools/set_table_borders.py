@@ -178,6 +178,10 @@ def _fix_formula_table(tbl_xml, text_width):
     if "<w:tblBorders>" in tbl_xml:
         tbl_xml = re.sub(r"<w:tblBorders>.*?</w:tblBorders>", "", tbl_xml, flags=re.S)
     tbl_xml = tbl_xml.replace("<w:tblPr>", "<w:tblPr>" + _all_none(), 1)
+    # 公式表不能再挂三线表样式：即使直接格式全设为 nil，
+    # Word 仍会套用样式的上下边框（WPS 不会），公式上下就出现两条线。
+    # 去掉 tblStyle，让公式表真正无框。
+    tbl_xml = re.sub(r'<w:tblStyle[^>]*/>', '', tbl_xml, count=1)
     # 固定布局，否则 Word 仍会按内容重算列宽
     if "<w:tblLayout" not in tbl_xml:
         tbl_xml = tbl_xml.replace("<w:tblPr>", '<w:tblPr><w:tblLayout w:type="fixed"/>', 1)

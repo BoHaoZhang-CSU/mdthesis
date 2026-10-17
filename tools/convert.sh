@@ -117,6 +117,12 @@ python3 -I "$HERE/set_table_borders.py" "$TPL" "$tmpdir/s1.docx" "$tmpdir/s2.doc
 
 # 4. 给目录域填上缓存条目 —— pandoc 生成的域 separate 和 end 之间是空的，
 #    不刷新域的程序会显示成一片空白。
-python3 -I "$HERE/build_toc.py" "$TPL" "$tmpdir/s2.docx" "$OUT"
+python3 -I "$HERE/build_toc.py" "$TPL" "$tmpdir/s2.docx" "$tmpdir/toc.docx"
+
+# 5. 去掉非法目录部件（如 `word/media/`）及对应的 Content_Types 覆盖。
+#    带目录条目的 docx 会被 Word 判为「文件可能已经损坏」（WPS 宽容一些），
+#    即使正文 XML 完全合法。模板和中间重打包步骤都可能带进目录条目，
+#    所以输出前统一兜底清一遍。
+python3 -I "$HERE/clean_docx_dirs.py" "$tmpdir/toc.docx" "$OUT" >/dev/null
 
 echo "完成: $OUT ($(stat -c%s "$OUT") 字节)"

@@ -92,6 +92,20 @@ try:
 except Exception: print(999)")
   [ "$dangling" = "0" ]; check "无悬空关系引用（实际 $dangling）" "$?"
 
+  # 通用断言：docx 包里不能有目录条目，也不能有指向目录的 Content_Types Override。
+  # pandoc 用参考模板生成时会带进 word/media/；Word 会判整个包「文件可能已经损坏」，
+  # WPS 宽容。输出前 tools/clean_docx_dirs.py 会清掉（2026-10-17 另一个 AI 报的）。
+  pkg=$(python3 -I -c "
+import zipfile,re
+try:
+    z=zipfile.ZipFile('$out')
+    dirs=[i.filename for i in z.infolist() if i.is_dir()]
+    ct=z.read('[Content_Types].xml').decode()
+    over=[m.group(1) for m in re.finditer(r'<Override\b[^>]*PartName=\"([^\"]*)\"', ct) if m.group(1).endswith('/')]
+    print('%d|%d' % (len(dirs), len(over)))
+except Exception: print('999|999')")
+  [ "$pkg" = "0|0" ]; check "docx 包无目录条目/目录 Override（实际 $pkg）" "$?"
+
   # 用例专属断言
   case "$name" in
     T1_hash_chapters|T2_multi_h1)
@@ -146,10 +160,11 @@ def _clean(t):
     return len(sides)==6 and all('w:val=\"nil\"' in s for s in sides)
 ft=[t for t in re.findall(r'<w:tbl>.*?</w:tbl>', d, re.S) if 'm:oMathPara' in t]
 borderless = bool(ft) and all(_clean(t) for t in ft)
-print(','.join(nums) + '|' + ('1' if borderless else '0'))
+no_style = bool(ft) and all('<w:tblStyle' not in t for t in ft)
+print(','.join(nums) + '|' + ('1' if borderless else '0') + '|' + ('1' if no_style else '0'))
 ")
-      [ "$got" = "（1-1）,（1-2）,（2-1）|1" ]
-      check "按章编号正确且公式表无边框（实际 $got）" "$?"
+      [ "$got" = "（1-1）,（1-2）,（2-1）|1|1" ]
+      check "按章编号正确、公式表无边框且不挂三线表样式（实际 $got）" "$?"
       # 列宽不变量：首尾等宽（→ 公式列中心 = 页面中心）且总宽 = 正文宽度
       # （→ 编号右边缘落在版心右边距）。公式列尽量宽，长公式才不容易被折断。
       lw=$(python3 -I -c "
